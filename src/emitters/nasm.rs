@@ -64,6 +64,7 @@ impl NasmEmitter {
             SectionKind::Text => "section .text".into(),
             SectionKind::Data => "section .data".into(),
             SectionKind::Bss => "section .bss".into(),
+            SectionKind::Rodata => "section .rodata".into(),
             SectionKind::Custom(name) => format!("section {}", name),
         }
     }
@@ -108,6 +109,21 @@ impl NasmEmitter {
             DataDef::ReserveWords(n) => format!("{}: resw {}", name, n),
             DataDef::ReserveDwords(n) => format!("{}: resd {}", name, n),
             DataDef::ReserveQwords(n) => format!("{}: resq {}", name, n),
+            DataDef::Float32(vals) => {
+                let vs: Vec<String> = vals.iter().map(|v| format!("{}", v)).collect();
+                format!("{}: dd {}", name, vs.join(", "))
+            }
+            DataDef::Float64(vals) => {
+                let vs: Vec<String> = vals.iter().map(|v| format!("{}", v)).collect();
+                format!("{}: dq {}", name, vs.join(", "))
+            }
+            DataDef::Struct(struct_name, fields) => {
+                let mut lines = vec![format!("; {} {} (struct {})", name, struct_name, struct_name)];
+                for field in fields {
+                    lines.push(Self::emit_data_def(field));
+                }
+                lines.join("\n")
+            }
         }
     }
 }
@@ -164,6 +180,9 @@ impl Emitter for NasmEmitter {
                     match item {
                         FunctionItem::Label(lbl) => {
                             out.push_str(&format!(".{}:\n", lbl));
+                        }
+                        FunctionItem::Comment(text) => {
+                            out.push_str(&format!("    ; {}\n", text));
                         }
                         FunctionItem::Instruction(instr) => {
                             let mnemonic = instr.opcode.name();

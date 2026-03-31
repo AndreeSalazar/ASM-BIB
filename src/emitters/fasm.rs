@@ -21,6 +21,7 @@ impl FasmEmitter {
             SectionKind::Text => "section '.text' code readable executable".into(),
             SectionKind::Data => "section '.data' data readable writeable".into(),
             SectionKind::Bss => "section '.bss' readable writeable".into(),
+            SectionKind::Rodata => "section '.rodata' data readable".into(),
             SectionKind::Custom(name) => format!("section '{}' readable", name),
         }
     }
@@ -97,6 +98,21 @@ impl FasmEmitter {
             DataDef::ReserveWords(n) => format!("rw {}", n),
             DataDef::ReserveDwords(n) => format!("rd {}", n),
             DataDef::ReserveQwords(n) => format!("rq {}", n),
+            DataDef::Float32(vals) => {
+                let vs: Vec<String> = vals.iter().map(|v| format!("{}", v)).collect();
+                format!("dd {}", vs.join(", "))
+            }
+            DataDef::Float64(vals) => {
+                let vs: Vec<String> = vals.iter().map(|v| format!("{}", v)).collect();
+                format!("dq {}", vs.join(", "))
+            }
+            DataDef::Struct(struct_name, fields) => {
+                let mut parts = vec![format!("; struct {}", struct_name)];
+                for field in fields {
+                    parts.push(self.emit_data_item(field));
+                }
+                return parts.join("\n");
+            }
         };
         format!("    {} {}", item.name, value)
     }
@@ -134,6 +150,9 @@ impl Emitter for FasmEmitter {
                         }
                         FunctionItem::Label(label) => {
                             out.push_str(&format!(".{}:\n", label));
+                        }
+                        FunctionItem::Comment(text) => {
+                            out.push_str(&format!("    ; {}\n", text));
                         }
                     }
                 }

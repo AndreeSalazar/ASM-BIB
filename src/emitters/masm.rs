@@ -31,6 +31,12 @@ impl Emitter for MasmEmitter {
                         emit_data_item(&mut out, &item.name, &item.def);
                     }
                 }
+                SectionKind::Rodata => {
+                    out.push_str(".const\n");
+                    for item in &section.data {
+                        emit_data_item(&mut out, &item.name, &item.def);
+                    }
+                }
                 SectionKind::Custom(name) => {
                     out.push_str(&format!("{}\n", name));
                     for func in &section.functions {
@@ -58,6 +64,9 @@ fn emit_function(out: &mut String, func: &Function) {
         match item {
             FunctionItem::Label(lbl) => {
                 out.push_str(&format!("{}:\n", lbl));
+            }
+            FunctionItem::Comment(text) => {
+                out.push_str(&format!("    ; {}\n", text));
             }
             FunctionItem::Instruction(instr) => {
                 out.push_str(&format!("    {}\n", emit_instruction(instr)));
@@ -162,6 +171,20 @@ fn emit_data_item(out: &mut String, name: &str, def: &DataDef) {
         }
         DataDef::ReserveQwords(n) => {
             out.push_str(&format!("{} QWORD {} DUP(?)\n", name, n));
+        }
+        DataDef::Float32(vals) => {
+            let vs: Vec<String> = vals.iter().map(|v| format!("{}", v)).collect();
+            out.push_str(&format!("{} REAL4 {}\n", name, vs.join(", ")));
+        }
+        DataDef::Float64(vals) => {
+            let vs: Vec<String> = vals.iter().map(|v| format!("{}", v)).collect();
+            out.push_str(&format!("{} REAL8 {}\n", name, vs.join(", ")));
+        }
+        DataDef::Struct(struct_name, fields) => {
+            out.push_str(&format!("; {} (struct {})\n", name, struct_name));
+            for field in fields {
+                emit_data_item(out, &field.name, &field.def);
+            }
         }
     }
 }

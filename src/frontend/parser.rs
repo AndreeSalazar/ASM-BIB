@@ -154,6 +154,10 @@ impl Parser {
                         name,
                         exported,
                         naked,
+                        is_inline: false,
+                        is_extern: false,
+                        params: Vec::new(),
+                        local_vars: Vec::new(),
                         instructions,
                     };
 
@@ -379,6 +383,18 @@ impl Parser {
                 scale: mem.scale,
                 disp: mem.disp,
             },
+            Expr::Bool(true) => Operand::Imm(1),
+            Expr::Bool(false) | Expr::Null => Operand::Imm(0),
+            Expr::Call { name, .. } => Operand::Label(name.clone()),
+            Expr::NamespaceAccess { path } => Operand::Label(path.join("::")),
+            Expr::FieldAccess { object, field } => {
+                if let Expr::Register(r) = object.as_ref() {
+                    Operand::Label(format!("{}.{}", r, field))
+                } else {
+                    Operand::Label(field.clone())
+                }
+            }
+            _ => Operand::Imm(0),
         }
     }
 
@@ -440,7 +456,7 @@ impl Parser {
             _ => return Err(format!("unknown data type: {}", type_name)),
         };
 
-        Ok(DataItem { name: name.to_string(), def })
+        Ok(DataItem::new(name.to_string(), def))
     }
 
     fn expect_lparen(&mut self) -> Result<(), String> {

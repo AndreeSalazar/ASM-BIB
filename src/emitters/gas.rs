@@ -16,6 +16,7 @@ impl Emitter for GasEmitter {
                 SectionKind::Text => out.push_str(".text\n"),
                 SectionKind::Data => out.push_str(".data\n"),
                 SectionKind::Bss => out.push_str(".bss\n"),
+                SectionKind::Rodata => out.push_str(".section .rodata\n"),
                 SectionKind::Custom(name) => {
                     out.push_str(&format!(".section {}\n", name));
                 }
@@ -35,6 +36,9 @@ impl Emitter for GasEmitter {
                     match item {
                         FunctionItem::Label(label) => {
                             out.push_str(&format!(".{}:\n", label));
+                        }
+                        FunctionItem::Comment(text) => {
+                            out.push_str(&format!("    # {}\n", text));
                         }
                         FunctionItem::Instruction(instr) => {
                             out.push_str(&emit_instruction(instr));
@@ -87,6 +91,22 @@ fn emit_data_def(def: &DataDef) -> String {
         DataDef::ReserveWords(n) => format!("    .space {}\n", n * 2),
         DataDef::ReserveDwords(n) => format!("    .space {}\n", n * 4),
         DataDef::ReserveQwords(n) => format!("    .space {}\n", n * 8),
+        DataDef::Float32(vals) => {
+            let vs: Vec<String> = vals.iter().map(|v| format!("{}", v)).collect();
+            format!("    .float {}\n", vs.join(", "))
+        }
+        DataDef::Float64(vals) => {
+            let vs: Vec<String> = vals.iter().map(|v| format!("{}", v)).collect();
+            format!("    .double {}\n", vs.join(", "))
+        }
+        DataDef::Struct(_struct_name, fields) => {
+            let mut out = String::new();
+            for field in fields {
+                out.push_str(&format!("{}:\n", field.name));
+                out.push_str(&emit_data_def(&field.def));
+            }
+            out
+        }
     }
 }
 

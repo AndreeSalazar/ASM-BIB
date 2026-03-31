@@ -39,6 +39,9 @@ impl Emitter for FlatEmitter {
                         FunctionItem::Label(label) => {
                             out.push_str(&format!("{}:\n", label));
                         }
+                        FunctionItem::Comment(text) => {
+                            out.push_str(&format!("    ; {}\n", text));
+                        }
                         FunctionItem::Instruction(instr) => {
                             out.push_str(&format!("    {}\n", format_instruction(instr)));
                         }
@@ -139,5 +142,20 @@ fn format_data(def: &DataDef) -> String {
         DataDef::ReserveWords(n) => format!("resw {}", n),
         DataDef::ReserveDwords(n) => format!("resd {}", n),
         DataDef::ReserveQwords(n) => format!("resq {}", n),
+        DataDef::Float32(vals) => {
+            let vs: Vec<String> = vals.iter().map(|v| format!("{}", v)).collect();
+            format!("dd {}", vs.join(", "))
+        }
+        DataDef::Float64(vals) => {
+            let vs: Vec<String> = vals.iter().map(|v| format!("{}", v)).collect();
+            format!("dq {}", vs.join(", "))
+        }
+        DataDef::Struct(struct_name, fields) => {
+            let mut lines = vec![format!("; struct {}", struct_name)];
+            for field in fields {
+                lines.push(format!("{}: {}", field.name, format_data(&field.def)));
+            }
+            lines.join("\n")
+        }
     }
 }
