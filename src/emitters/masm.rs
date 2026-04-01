@@ -312,8 +312,20 @@ fn emit_instruction(instr: &Instruction) -> String {
     // Determine if we need size qualifiers on memory operands
     let inferred_size = infer_operand_size(&instr.operands);
 
+    // Detect which operands are memory-context (Label used as data ref, not branch target)
+    let is_branch = matches!(instr.opcode,
+        Opcode::Jmp | Opcode::Je | Opcode::Jne | Opcode::Jl | Opcode::Jle |
+        Opcode::Jg | Opcode::Jge | Opcode::Jb | Opcode::Jbe | Opcode::Ja | Opcode::Jae |
+        Opcode::Call | Opcode::B | Opcode::Bl | Opcode::Beq | Opcode::Bne |
+        Opcode::Blt | Opcode::Bgt | Opcode::Ble | Opcode::Bge |
+        Opcode::Jal | Opcode::Jalr
+    );
+
+    let is_lea = matches!(instr.opcode, Opcode::Lea);
+
     let ops: Vec<String> = instr.operands.iter().map(|op| {
-        emit_operand(op, inferred_size)
+        let is_mem_ctx = matches!(op, Operand::Label(_)) && !is_branch && !is_lea;
+        emit_operand(op, inferred_size, is_mem_ctx)
     }).collect();
 
     format!("{} {}", mnemonic, ops.join(", "))
@@ -330,30 +342,37 @@ fn masm_mnemonic(opcode: &Opcode) -> &str {
 
 // ─── Operand emission ──────────────────────────────────────────────────
 
-fn emit_operand(op: &Operand, inferred_size: Option<Size>) -> String {
+fn emit_operand(op: &Operand, inferred_size: Option<Size>, is_memory_context: bool) -> String {
     match op {
         Operand::Reg(reg) => reg.name(),
-        Operand::Imm(val) => {
-            if *val < 0 {
-                format!("-{}", -val)
-            } else if *val > 9 {
-                // MASM convention: hex with trailing 'h'
-                let hex = format!("{:X}h", val);
-                // If starts with letter, prefix with 0
-                if hex.starts_with(|c: char| c.is_ascii_alphabetic()) {
-                    format!("0{}", hex)
-                } else {
-                    hex
-                }
+        Operand::Imm(val) => emit_immediate(*val),
+        Operand::Label(name) => {
+            if is_memory_context {
+                // Data label used as memory operand: add size qualifier
+                maybe_size_prefix(name.clone(), inferred_size)
             } else {
-                val.to_string()
+                name.clone()
             }
         }
-        Operand::Label(name) => name.clone(),
         Operand::StringLit(s) => format!("\"{}\"", s),
         Operand::Memory { base, index, scale, disp } => {
             emit_memory(base, index, *scale, *disp, inferred_size)
         }
+    }
+}
+
+fn emit_immediate(val: i64) -> String {
+    if val < 0 {
+        format!("-{}", -val)
+    } else if val > 9 {
+        let hex = format!("{:X}h", val);
+        if hex.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            format!("0{}", hex)
+        } else {
+            hex
+        }
+    } else {
+        val.to_string()
     }
 }
 

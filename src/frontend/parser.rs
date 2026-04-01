@@ -239,16 +239,29 @@ impl Parser {
                 Token::Ident(_) => {
                     let name = if let Token::Ident(s) = self.advance() { s } else { unreachable!() };
 
+                    // Handle compound instructions like "rep movsb", "rep stosb"
+                    let final_name = if name == "rep" {
+                        if let Token::Ident(ref suffix) = *self.peek() {
+                            let compound = format!("rep {}", suffix);
+                            self.advance();
+                            compound
+                        } else {
+                            name
+                        }
+                    } else {
+                        name
+                    };
+
                     if matches!(self.peek(), Token::LParen) {
                         let args = self.parse_call_args()?;
-                        let inst = self.build_instruction(&name, &args)?;
+                        let inst = self.build_instruction(&final_name, &args)?;
                         items.push(FunctionItem::Instruction(inst));
                     } else if matches!(self.peek(), Token::Equals) {
                         // skip in-function data for now
                         self.skip_to_newline();
                     } else {
                         // bare instruction with no args (like ret, nop, etc.)
-                        if let Some(opcode) = Opcode::from_str(&name) {
+                        if let Some(opcode) = Opcode::from_str(&final_name) {
                             items.push(FunctionItem::Instruction(Instruction::zero(opcode)));
                         }
                     }
@@ -305,6 +318,10 @@ impl Parser {
             Token::Integer(v) | Token::HexInteger(v) => {
                 self.advance();
                 Ok(Expr::Immediate(v))
+            }
+            Token::FloatLiteral(v) => {
+                self.advance();
+                Ok(Expr::Label(format!("{}", v)))
             }
             Token::StringLiteral(s) => {
                 self.advance();
@@ -377,12 +394,27 @@ impl Parser {
             Expr::Immediate(v) => Operand::Imm(*v),
             Expr::Label(s) => Operand::Label(s.clone()),
             Expr::StringLit(s) => Operand::StringLit(s.clone()),
-            Expr::Memory(mem) => Operand::Memory {
-                base: mem.base.as_ref().and_then(|r| Register::from_str(r)),
-                index: mem.index.as_ref().and_then(|r| Register::from_str(r)),
-                scale: mem.scale,
-                disp: mem.disp,
-            },
+            Expr::Memory(mem) => {
+                let base_reg = mem.base.as_ref().and_then(|r| Register::from_str(r));
+                let index_reg = mem.index.as_ref().and_then(|r| Register::from_str(r));
+
+                // If base is a non-register name (label/data symbol) with no register parts
+                if let Some(ref base_name) = mem.base {
+                    if base_reg.is_none() && index_reg.is_none() {
+                        if mem.disp != 0 {
+                            return Operand::Label(format!("{} + {}", base_name, mem.disp));
+                        }
+                        return Operand::Label(base_name.clone());
+                    }
+                }
+
+                Operand::Memory {
+                    base: base_reg,
+                    index: index_reg,
+                    scale: mem.scale,
+                    disp: mem.disp,
+                }
+            }
             Expr::Bool(true) => Operand::Imm(1),
             Expr::Bool(false) | Expr::Null => Operand::Imm(0),
             Expr::Call { name, .. } => Operand::Label(name.clone()),
@@ -452,6 +484,38 @@ impl Parser {
                 let args = self.parse_call_args()?;
                 let n = args.first().and_then(|a| if let Expr::Immediate(v) = a { Some(*v as usize) } else { None }).unwrap_or(1);
                 DataDef::ReserveDwords(n)
+            }
+            "float32" | "real4" => {
+                let args = self.parse_call_args()?;
+                let vals: Vec<f32> = args.iter().filter_map(|a| {
+                    match a {
+                        Expr::Immediate(v) => Some(*v as f32),
+                        Expr::Label(s) => s.parse::<f32>().ok(),
+                        _ => None,
+                    }
+                }).collect();
+                DataDef::Float32(vals)
+            }
+            "float64" | "real8" => {
+                let args = self.parse_call_args()?;
+                let vals: Vec<f64> = args.iter().filter_map(|a| {
+                    match a {
+                        Expr::Immediate(v) => Some(*v as f64),
+                        Expr::Label(s) => s.parse::<f64>().ok(),
+                        _ => None,
+                    }
+                }).collect();
+                DataDef::Float64(vals)
+            }
+            "resw" => {
+                let args = self.parse_call_args()?;
+                let n = args.first().and_then(|a| if let Expr::Immediate(v) = a { Some(*v as usize) } else { None }).unwrap_or(1);
+                DataDef::ReserveWords(n)
+            }
+            "resq" => {
+                let args = self.parse_call_args()?;
+                let n = args.first().and_then(|a| if let Expr::Immediate(v) = a { Some(*v as usize) } else { None }).unwrap_or(1);
+                DataDef::ReserveQwords(n)
             }
             _ => return Err(format!("unknown data type: {}", type_name)),
         };

@@ -80,6 +80,7 @@ pub enum Token {
     Ident(String),
     Integer(i64),
     HexInteger(i64),
+    FloatLiteral(f64),
     StringLiteral(String),
 
     // Structure
@@ -206,6 +207,27 @@ impl Lexer {
                 break;
             }
         }
+
+        // Check for float: digits followed by '.' and another digit
+        if self.peek() == Some('.') {
+            if let Some(next) = self.input.get(self.pos + 1) {
+                if next.is_ascii_digit() {
+                    self.advance(); // consume '.'
+                    num_str.push('.');
+                    while let Some(ch) = self.peek() {
+                        if ch.is_ascii_digit() || ch == '_' {
+                            if ch != '_' { num_str.push(ch); }
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    let val: f64 = num_str.parse().unwrap_or(0.0);
+                    return Token::FloatLiteral(val);
+                }
+            }
+        }
+
         let val: i64 = num_str.parse().unwrap_or(0);
         Token::Integer(val)
     }
@@ -435,6 +457,7 @@ impl Lexer {
                             match self.read_number(c) {
                                 Token::Integer(v) => tokens.push(Token::Integer(-v)),
                                 Token::HexInteger(v) => tokens.push(Token::HexInteger(-v)),
+                                Token::FloatLiteral(v) => tokens.push(Token::FloatLiteral(-v)),
                                 _ => {}
                             }
                         }
