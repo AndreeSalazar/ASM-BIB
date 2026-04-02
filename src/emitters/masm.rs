@@ -63,7 +63,6 @@ fn emit_header(out: &mut String, program: &Program) {
         Arch::X86_64 => {
             // ML64 doesn't need .686 — it's implicit
         }
-        _ => {}
     }
 
     // Memory model
@@ -86,7 +85,6 @@ fn emit_header(out: &mut String, program: &Program) {
         Arch::X86_64 => {
             // ML64 doesn't use .model — flat 64 is implicit
         }
-        _ => {}
     }
 
     out.push('\n');
@@ -383,9 +381,7 @@ fn emit_instruction(instr: &Instruction) -> String {
     let is_branch = matches!(instr.opcode,
         Opcode::Jmp | Opcode::Je | Opcode::Jne | Opcode::Jl | Opcode::Jle |
         Opcode::Jg | Opcode::Jge | Opcode::Jb | Opcode::Jbe | Opcode::Ja | Opcode::Jae |
-        Opcode::Call | Opcode::B | Opcode::Bl | Opcode::Beq | Opcode::Bne |
-        Opcode::Blt | Opcode::Bgt | Opcode::Ble | Opcode::Bge |
-        Opcode::Jal | Opcode::Jalr
+        Opcode::Call
     );
 
     let is_lea = matches!(instr.opcode, Opcode::Lea);
@@ -682,9 +678,6 @@ fn emit_end(out: &mut String, program: &Program) {
                 Some(name) => out.push_str(&format!("END {}\n", name)),
                 None => out.push_str("END\n"),
             }
-        }
-        _ => {
-            out.push_str("END\n");
         }
     }
 }

@@ -13,15 +13,6 @@ pub fn prologue(stack_size: i64, arch: Arch) -> Vec<Instruction> {
             Instruction::two(Opcode::Mov, Operand::Reg(Register::Bp), Operand::Reg(Register::Sp)),
             Instruction::two(Opcode::Sub, Operand::Reg(Register::Sp), Operand::Imm(stack_size)),
         ],
-        Arch::Arm64 => vec![
-            Instruction::new(Opcode::Stp, vec![
-                Operand::Reg(Register::X(29)),
-                Operand::Reg(Register::X(30)),
-            ]),
-            Instruction::two(Opcode::Mov, Operand::Reg(Register::X(29)), Operand::Reg(Register::ArmSp)),
-            Instruction::two(Opcode::Sub, Operand::Reg(Register::ArmSp), Operand::Imm(stack_size)),
-        ],
-        _ => vec![],
     }
 }
 
@@ -37,14 +28,6 @@ pub fn epilogue(arch: Arch) -> Vec<Instruction> {
             Instruction::one(Opcode::Pop, Operand::Reg(Register::Bp)),
             Instruction::zero(Opcode::Ret),
         ],
-        Arch::Arm64 => vec![
-            Instruction::new(Opcode::Ldp, vec![
-                Operand::Reg(Register::X(29)),
-                Operand::Reg(Register::X(30)),
-            ]),
-            Instruction::zero(Opcode::ArmRet),
-        ],
-        _ => vec![],
     }
 }
 

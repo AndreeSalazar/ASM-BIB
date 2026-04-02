@@ -18,15 +18,12 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("ASM-BIB v1.0 — Universal ASM with Python-like syntax 💀🦈");
-        eprintln!("Usage: asm-bib <archivo.pasm> [--nasm|--gas|--masm|--fasm|--flat] [--step] [-o output]");
+        eprintln!("ASM-BIB v2.0 — x86 ASM with Python-like syntax 💀🦈");
+        eprintln!("Usage: asm-bib <archivo.pasm> [--nasm|--masm] [--step] [-o output]");
         eprintln!();
         eprintln!("Options:");
         eprintln!("  --nasm     Export NASM Intel syntax (.asm)");
-        eprintln!("  --gas      Export GAS AT&T syntax (.s)");
         eprintln!("  --masm     Export MASM Microsoft syntax (.asm)");
-        eprintln!("  --fasm     Export FASM syntax (.asm)");
-        eprintln!("  --flat     Export flat binary (bootloader) (.bin)");
         eprintln!("  --step     Show pipeline steps (debug mode)");
         eprintln!("  -o FILE    Output file (default: stdout)");
         process::exit(1);
@@ -41,10 +38,7 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--nasm" => output_format = OutputFormat::Nasm,
-            "--gas" => output_format = OutputFormat::Gas,
             "--masm" => output_format = OutputFormat::Masm,
-            "--fasm" => output_format = OutputFormat::Fasm,
-            "--flat" => output_format = OutputFormat::Flat,
             "--step" => step_mode = true,
             "-o" => {
                 i += 1;
@@ -197,10 +191,7 @@ fn main() {
         let out_bytes = output.len();
         let format_name = match output_format {
             OutputFormat::Nasm => "NASM (Intel)",
-            OutputFormat::Gas => "GAS (AT&T)",
             OutputFormat::Masm => "MASM (Microsoft)",
-            OutputFormat::Fasm => "FASM",
-            OutputFormat::Flat => "Flat binary",
         };
         eprintln!("├─ STEP 4 · Emit → {} ─────────────────────────────", format_name);
         eprintln!("│  output:     {} lines, {} bytes", out_lines, out_bytes);
