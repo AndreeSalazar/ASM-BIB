@@ -1,8 +1,8 @@
 [package]
 name = "asm-bib"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
-description = "NASM-BIB — Universal ASM abstraction with Python-like syntax"
+description = "ASM-BIB — x86 ASM abstraction (NASM + MASM) with Python-like syntax"
 authors = ["Eddi Andreé Salazar Matos"]
 
 [dependencies]

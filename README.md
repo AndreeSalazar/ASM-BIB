@@ -1,79 +1,85 @@
 # ASM-BIB 💀🦈
 
-**Universal ASM abstraction — Escribe una vez, exporta a TODOS los dialectos.**
+**x86 ASM abstraction — Escribe .pasm, exporta a NASM o MASM.**
 
-> Python-like syntax → NASM / GAS / MASM / FASM / Flat binary
+> Python-like syntax → NASM / MASM → tu compilador ASM-BIB principal
 
-## Un mismo código → todos los targets
+## Pipeline
+
+```
+.pasm source → Lexer → Parser → Program IR → Emitter → .asm (NASM | MASM)
+```
+
+## Un mismo código → NASM o MASM
 
 ```python
 @arch('x86_64')
-@format('elf')
+@format('pe')
 
 @section('.text')
 @export
 def main():
     push(rbp)
     mov(rbp, rsp)
+    sub(rsp, 32)
     lea(rcx, msg)
     call(printf)
     xor(eax, eax)
+    leave()
     ret()
 
 @section('.data')
 msg = string("Hello from ASM-BIB!\n")
 ```
 
-## Exportar a cualquier dialecto
+## Exportar
 
 ```bash
 asm-bib hello.pasm --nasm -o hello.asm     # NASM Intel
-asm-bib hello.pasm --gas  -o hello.s       # GAS AT&T
 asm-bib hello.pasm --masm -o hello.asm     # MASM Microsoft
-asm-bib hello.pasm --fasm -o hello.asm     # FASM
-asm-bib boot.pasm  --flat -o boot.bin      # Flat binary
 ```
 
-## Arquitecturas soportadas
+## Arquitecturas x86
 
 | Arch | Registros | Status |
 |------|-----------|--------|
 | x86-64 | rax..r15, xmm0..15, ymm, zmm | ✅ Completo |
 | x86-32 | eax..ebp, r8d..r15d | ✅ Completo |
 | x86-16 | ax..bp (bootloader) | ✅ Completo |
-| ARM64 | x0..x30, w0..w30, v0..v31 | ✅ Base |
-| RISC-V | x0..x31, f0..f31 | ✅ Base |
-| MIPS | $0..$31 | ✅ Base |
 
-## Emitters — Estado de avance
+## Emitters
 
-| Emitter | Directivas | Instrucciones | Data | Structs | PTR Size | Extras | Status |
-|---------|-----------|---------------|------|---------|----------|--------|--------|
-| **NASM** | bits, org, section, global | ✅ All x86 | db/dw/dd/dq/resX | via comment | N/A | hex 0x format | ✅ Completo |
-| **GAS** | .text/.data/.bss, .globl | ✅ All x86 (AT&T suffix) | .byte/.word/.long/.quad/.asciz | via labels | N/A | AT&T reversed operands | ✅ Completo |
-| **MASM** | .686p/.model/option, .code/.data/.const/.data? | ✅ All x86 | BYTE/WORD/DWORD/QWORD/REAL4/REAL8 | STRUCT/ENDS | BYTE PTR..ZMMWORD PTR | PROC+params, LOCAL, EQU, EXTERNDEF, INCLUDELIB, END | ✅ **Canon completo** |
-| **FASM** | format, section attrs, public | ✅ All x86 | db/dw/dd/dq/rb/rw/rd/rq | via comment | N/A | format directive | ✅ Completo |
-| **Flat** | BITS, ORG, global | ✅ All x86 | db/dw/dd/dq/resX | via comment | N/A | bootloader binary | ✅ Completo |
+| Emitter | Directivas | Instrucciones | Data | Structs | PTR Size | Status |
+|---------|-----------|---------------|------|---------|----------|--------|
+| **NASM** | bits, org, section, global, extern | ✅ All x86 | db/dw/dd/dq/resX | via comment | N/A | ✅ Completo |
+| **MASM** | .686p/.model/option, .code/.data/.const/.data? | ✅ All x86 | BYTE/WORD/DWORD/QWORD/REAL4/REAL8 | STRUCT/ENDS | BYTE PTR..ZMMWORD PTR | ✅ Canon completo |
 
 ## MASM — Canon completo ✅
-
-El emitter MASM ahora cubre **todo el estándar**:
 
 - **Procesador**: `.8086` / `.686p` / ML64 implícito según `@arch`
 - **Modelo de memoria**: `.model tiny/small/flat` según `@format`
 - **Secciones**: `.code` / `.data` / `.data?` / `.const` / `SEGMENT`
 - **Procedimientos**: `PROC` con parámetros tipados + `ENDP`
 - **Variables locales**: `LOCAL var:TYPE`
-- **Calificadores de tamaño**: `BYTE PTR`, `WORD PTR`, `DWORD PTR`, `QWORD PTR`, `XMMWORD PTR`, `YMMWORD PTR`, `ZMMWORD PTR`
+- **Calificadores de tamaño**: `BYTE PTR` → `ZMMWORD PTR`
 - **Structs**: `STRUCT` / `ENDS` con campos tipados
 - **Enums**: Serie de `EQU` con prefijo `EnumName_Variant`
 - **Constantes**: `name EQU value`
-- **Hexadecimal**: Sufijo `h` con prefijo `0` si empieza en letra (canon MASM)
+- **Hexadecimal**: Sufijo `h` con prefijo `0` si empieza en letra
 - **Strings**: Escape explícito `"text", 0Ah, 0Dh, 0`
 - **Extern**: `EXTERNDEF name:PROC` / `INCLUDELIB lib.lib`
-- **PUBLIC**: Funciones exportadas
-- **Alineación**: `ALIGN n`
+- **AUTO INCLUDELIB**: Detecta `call(ExitProcess)` → `INCLUDELIB kernel32.lib`
 - **Entry point**: `END main` / `END _start`
+
+## NASM — Completo ✅
+
+- **Bits**: `bits 16/32/64` según `@arch`
+- **Origin**: `org 0x7C00` para bootloaders
+- **Secciones**: `section .text` / `.data` / `.bss` / `.rodata`
+- **Global/Extern**: `global main` + `extern printf`
+- **Hexadecimal**: Formato `0x` estándar
+- **Strings**: Escape con bytes: `"text", 10, 0`
+- **Labels locales**: `.label:` dentro de funciones
 
 ## Ejemplos MASM
 
@@ -96,19 +102,16 @@ El emitter MASM ahora cubre **todo el estándar**:
 | 13 | macros_equ | Constants (EQU), page alignment |
 | 14 | win32_msgbox | MessageBoxA (x86-32) |
 
-## IR — Representación intermedia
-
-```
-.pasm source → Lexer → Parser → Program IR → Emitter → .asm output
-```
+## Estructura del proyecto
 
 | Componente | Archivo | Función |
 |-----------|---------|---------|
 | Lexer | `src/frontend/lexer.rs` | Tokeniza .pasm (Python+C hybrid) |
 | Parser | `src/frontend/parser.rs` | Tokens → Program IR |
+| AST | `src/frontend/ast.rs` | Nodos AST del lenguaje .pasm |
 | IR | `src/ir/` | Instruction, Register, Section, DataDef, StructDef, EnumDef |
-| Emitters | `src/emitters/` | NASM, GAS, MASM, FASM, Flat |
-| Targets | `src/targets/` | x86_64, ARM64, RISC-V, MIPS validation |
+| Emitters | `src/emitters/` | NASM, MASM |
+| Targets | `src/targets/x86_64/` | x86 validation, registers, instructions |
 | Macros | `src/macros/stdlib.rs` | prologue/epilogue/syscall generators |
 
 ## Build
@@ -117,4 +120,4 @@ El emitter MASM ahora cubre **todo el estándar**:
 cargo build --release
 ```
 
-## Eddi Andreé Salazar Matos — Lima, Perú 🇵🇪 — Techne v1.0
+## Eddi Andreé Salazar Matos — Lima, Perú 🇵🇪 — Techne v2.0
