@@ -130,6 +130,10 @@ fn emit_data_def(item: &DataItem) -> String {
             }
             lines.join("\n")
         }
+        DataDef::DupByte(n, v) => format!("{}: times {} db {}", name, n, v),
+        DataDef::DupWord(n, v) => format!("{}: times {} dw {}", name, n, v),
+        DataDef::DupDword(n, v) => format!("{}: times {} dd {}", name, n, v),
+        DataDef::DupQword(n, v) => format!("{}: times {} dq {}", name, n, v),
     }
 }
 
@@ -231,6 +235,9 @@ impl Emitter for NasmEmitter {
                         }
                         FunctionItem::Comment(text) => {
                             out.push_str(&format!("    ; {}\n", text));
+                        }
+                        FunctionItem::RawDirective(line) => {
+                            out.push_str(&format!("    {}\n", line));
                         }
                         FunctionItem::Instruction(instr) => {
                             let mnemonic = instr.opcode.name();

@@ -1,123 +1,120 @@
-# ASM-BIB 💀🦈
+# ASM-BIB — Arquitectura v0.3 💀🦈
 
-**x86 ASM abstraction — Escribe .pasm, exporta a NASM o MASM.**
+> Eddi Andreé Salazar Matos | Lima, Perú 🇵🇪
+>
+> Objetivo: Escribir x86 ASM con sintaxis Python-like y sin dolor. MASM Nativo Completo.
 
-> Python-like syntax → NASM / MASM → tu compilador ASM-BIB principal
+![Banner](https://img.shields.io/badge/ASM--BIB-v0.3-red?style=for-the-badge&logo=rust)
 
-## Pipeline
+---
 
+## 🗺️ Roadmap de Desarrollo
+
+1. **`v0.3` (Actual)** — Stdlib completa (switch/case, structs, calling conventions, scanf, pow, macros listos). Canon MASM 100% abstraído.
+2. **`v0.4` - `games/ stdlib`** — Expansión de la librería estándar para juegos: Funciones math, físicas, y abstracción intensiva de SIMD (SSE/AVX/AVX2).
+3. **`v1.0` - MASM Assembler Propio** — Reemplazar la dependencia de `ml64.exe`! ASM-BIB emitirá los `.obj` directamente, siendo un orquestador independiente (Rust construyendo Rust/ASM).
+
+---
+
+## 1. Pipeline v0.3
+
+```text
+.pasm source → Lexer → Parser → IR (Intermediate Rep) → Emitter → .asm (MASM / NASM)
+                                                           ↓
+                                              assembler (ml64) → .obj → .exe
 ```
-.pasm source → Lexer → Parser → Program IR → Emitter → .asm (NASM | MASM)
-```
 
-## Un mismo código → NASM o MASM
+## 2. Sintaxis Python-like: ¡Puro x86 sin dolor!
+
+ASM-BIB provee una sintaxis limpia. Todo lo que odias de ensamblador lo hace el compilador por detrás:
 
 ```python
 @arch('x86_64')
-@format('pe')
+@format('win64')
+
+@section('.data')
+    msg = string("Select option: ")
+    fmt = string("%d")
+
+@section('.bss')
+    opcion = resd(1)
 
 @section('.text')
 @export
 def main():
-    push(rbp)
-    mov(rbp, rsp)
-    sub(rsp, 32)
-    lea(rcx, msg)
-    call(printf)
-    xor(eax, eax)
-    leave()
-    ret()
+    prologue(32)
+    print(msg)
+    scanf(fmt, opcion)
 
-@section('.data')
-msg = string("Hello from ASM-BIB!\n")
+    mov(eax, dword(opcion))
+    @switch(eax)
+        @case(1)
+            print("Elegiste 1!\n")
+            @break
+        @case(2)
+            print("Elegiste 2!\n")
+            @break
+        @default
+            print("No válido\n")
+            @break
+    @endswitch
+    
+    epilogue()
 ```
 
-## Exportar
+## 3. Librería Estándar (`stdlib` integrada en `.pasm`)
 
-```bash
-asm-bib hello.pasm --nasm -o hello.asm     # NASM Intel
-asm-bib hello.pasm --masm -o hello.asm     # MASM Microsoft
+La magia del parser de ASM-BIB expande estas macros a código x86 nativo/API invocations, manteniéndote enfocado.
+
+### I/O & Memoria
+* `print("string")` → Llama `printf` sin configurar registros explícitos.
+* `printf(fmt_str, reg1, reg2...)` → Format String nativo MSVCRT.
+* `scanf(fmt_str, dest...)` → User input rápido y seguro con formato C.
+* `input(buffer_label, size)` → Helper (traduce a `%s` si es requerido).
+* `alloc(size)` → Reserva heap win32 / libc.
+* `free(ptr)` → Borra memoria dinamida.
+
+### Punteros y Utilidades (CRT Arrays)
+* `strlen(str)` → `repne scasb` optimizado.
+* `strcpy(dst, src)`, `strcat(dst, src)` → Movimiento vectorizado.
+* `memcpy(dst, src, size)` → `rep movsb` zero-cost loop.
+* `memset(dst, val, size)` → `rep stosb`.
+* `memcmp(dst, src, size)` → `repe cmpsb`.
+
+### Operaciones Aritméticas (Math)
+* `abs(reg)` → `neg` + `cmovs`.
+* `min(r1, r2)`, `max(r1, r2)` → Comparadores + CMov nativos.
+* `pow(base, exp)` → Ciclos optimizados con `imul`.
+* `sqrt(dst, src)` → `sqrtss` (SSE escalar rápido).
+
+### SIMD / Cálculo Vectorial (Juegos y 3D)
+* `vec_add(dst, src)`, `vec_sub`, `vec_mul`, `vec_div` → `vaddps`, `vsubps` (AVX puro).
+* `dot4(dst, src)` → Producto punto de vectores 4D (`vdpps` unificado).
+* `mat4x4_mul(dst, A, B)` → Multiplicación masiva abstractada para matrices de shaders.
+
+## 4. Control Flow y Orientación a Objetos
+
+Adiós etiquetas sueltas:
+* `@if(reg, ==, val) / @else / @endif`
+* `@loop(reg, n) / @endloop`
+* `@while(reg, <, val) / @endwhile`
+* `@switch(reg) / @case(x) / @default / @endswitch`
+* `@break` y `@continue` dinámicos.
+
+Estructuras en ASM:
+```python
+@struct
+class Float3:
+    x = float32(1.0)
+    y = float32(0.0)
+    z = float32(0.0)
 ```
+Genera `ALIGN 4`, `STRUCT`, `ENDS` en MASM; o `struc` dinámico de NASM.
 
-## Arquitecturas x86
+Conéctate usando:
+* `@stdcall` para Win32 antiguo.
+* `@fastcall` para Win64 normal.
+* `@naked` sin alineación de stack automático.
 
-| Arch | Registros | Status |
-|------|-----------|--------|
-| x86-64 | rax..r15, xmm0..15, ymm, zmm | ✅ Completo |
-| x86-32 | eax..ebp, r8d..r15d | ✅ Completo |
-| x86-16 | ax..bp (bootloader) | ✅ Completo |
-
-## Emitters
-
-| Emitter | Directivas | Instrucciones | Data | Structs | PTR Size | Status |
-|---------|-----------|---------------|------|---------|----------|--------|
-| **NASM** | bits, org, section, global, extern | ✅ All x86 | db/dw/dd/dq/resX | via comment | N/A | ✅ Completo |
-| **MASM** | .686p/.model/option, .code/.data/.const/.data? | ✅ All x86 | BYTE/WORD/DWORD/QWORD/REAL4/REAL8 | STRUCT/ENDS | BYTE PTR..ZMMWORD PTR | ✅ Canon completo |
-
-## MASM — Canon completo ✅
-
-- **Procesador**: `.8086` / `.686p` / ML64 implícito según `@arch`
-- **Modelo de memoria**: `.model tiny/small/flat` según `@format`
-- **Secciones**: `.code` / `.data` / `.data?` / `.const` / `SEGMENT`
-- **Procedimientos**: `PROC` con parámetros tipados + `ENDP`
-- **Variables locales**: `LOCAL var:TYPE`
-- **Calificadores de tamaño**: `BYTE PTR` → `ZMMWORD PTR`
-- **Structs**: `STRUCT` / `ENDS` con campos tipados
-- **Enums**: Serie de `EQU` con prefijo `EnumName_Variant`
-- **Constantes**: `name EQU value`
-- **Hexadecimal**: Sufijo `h` con prefijo `0` si empieza en letra
-- **Strings**: Escape explícito `"text", 0Ah, 0Dh, 0`
-- **Extern**: `EXTERNDEF name:PROC` / `INCLUDELIB lib.lib`
-- **AUTO INCLUDELIB**: Detecta `call(ExitProcess)` → `INCLUDELIB kernel32.lib`
-- **Entry point**: `END main` / `END _start`
-
-## NASM — Completo ✅
-
-- **Bits**: `bits 16/32/64` según `@arch`
-- **Origin**: `org 0x7C00` para bootloaders
-- **Secciones**: `section .text` / `.data` / `.bss` / `.rodata`
-- **Global/Extern**: `global main` + `extern printf`
-- **Hexadecimal**: Formato `0x` estándar
-- **Strings**: Escape con bytes: `"text", 10, 0`
-- **Labels locales**: `.label:` dentro de funciones
-
-## Ejemplos MASM
-
-14 ejemplos completos en `examples/masm/`:
-
-| # | Ejemplo | Target |
-|---|---------|--------|
-| 01 | hello_console | Win64 WriteFile + ExitProcess |
-| 02 | arithmetic | add, sub, imul, idiv, inc, dec, neg |
-| 03 | control_flow | cmp, je, jne, jl, jg, jmp, loops |
-| 04 | procedures | PROC, params, LOCAL, factorial recursivo |
-| 05 | strings | rep movsb, scasb, string data |
-| 06 | memory | BYTE/DWORD PTR, base+idx*scale, arrays |
-| 07 | bitwise | and, or, xor, not, shl, shr, sar, rol, ror |
-| 08 | structs | STRUCT instances, field access |
-| 09 | sse_avx | movaps, addps, mulps, vmovaps, vaddps |
-| 10 | win64_api | GetStdHandle, WriteConsoleA, shadow space |
-| 11 | stack_frames | Manual stack frame + Win64 ABI |
-| 12 | floating_point | SSE scalar, REAL4/REAL8 |
-| 13 | macros_equ | Constants (EQU), page alignment |
-| 14 | win32_msgbox | MessageBoxA (x86-32) |
-
-## Estructura del proyecto
-
-| Componente | Archivo | Función |
-|-----------|---------|---------|
-| Lexer | `src/frontend/lexer.rs` | Tokeniza .pasm (Python+C hybrid) |
-| Parser | `src/frontend/parser.rs` | Tokens → Program IR |
-| AST | `src/frontend/ast.rs` | Nodos AST del lenguaje .pasm |
-| IR | `src/ir/` | Instruction, Register, Section, DataDef, StructDef, EnumDef |
-| Emitters | `src/emitters/` | NASM, MASM |
-| Targets | `src/targets/x86_64/` | x86 validation, registers, instructions |
-| Macros | `src/macros/stdlib.rs` | prologue/epilogue/syscall generators |
-
-## Build
-
-```bash
-cargo build --release
-```
-
-## Eddi Andreé Salazar Matos — Lima, Perú 🇵🇪 — Techne v2.0
+---
+**Build de un solo clic:** `cargo run -- hello.pasm --build --masm`

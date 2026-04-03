@@ -1,4 +1,5 @@
 use crate::ir::*;
+use crate::ir::section::CallingConv;
 use crate::emitters::{Emitter, OutputFormat};
 
 pub struct MasmEmitter;
@@ -26,6 +27,14 @@ impl Emitter for MasmEmitter {
 
         // === INCLUDELIB from auto-detected externs ===
         emit_includes_auto(&mut out, program, &auto_externs);
+
+        // === INCLUDE directives ===
+        for inc in &program.includes {
+            out.push_str(&format!("INCLUDE {}\n", inc));
+        }
+        if !program.includes.is_empty() {
+            out.push('\n');
+        }
 
         // === EXTERNDEF declarations (explicit + auto) ===
         emit_externs_auto(&mut out, program, &auto_externs);
@@ -165,6 +174,11 @@ fn infer_lib(name: &str) -> &'static str {
 fn emit_includes_auto(out: &mut String, program: &Program, auto_externs: &[String]) {
     let mut libs: Vec<&str> = Vec::new();
 
+    // Explicit INCLUDELIB from .pasm
+    for lib in &program.includelibs {
+        out.push_str(&format!("INCLUDELIB {}\n", lib));
+    }
+
     // From explicit externs
     for ext in &program.externs {
         let lib = infer_lib(&ext.name);
@@ -260,10 +274,13 @@ fn emit_structs(out: &mut String, program: &Program) {
         if s.is_pub {
             out.push_str(&format!("PUBLIC {}\n", s.name));
         }
+        if let Some(align) = s.alignment {
+            out.push_str(&format!("ALIGN {}\n", align));
+        }
         out.push_str(&format!("{} STRUCT\n", s.name));
         for field in &s.fields {
-            let type_name = size_to_masm_type(field.size);
-            out.push_str(&format!("    {} {}  ?\n", field.name, type_name));
+            let init = field.init_value.as_deref().unwrap_or("?");
+            out.push_str(&format!("    {} {}  {}\n", field.name, field.type_name, init));
         }
         out.push_str(&format!("{} ENDS\n\n", s.name));
     }
@@ -326,15 +343,28 @@ fn emit_function(out: &mut String, func: &Function, _program: &Program) {
         out.push_str(&format!("PUBLIC {}\n", func.name));
     }
 
+    // ALIGN before function
+    if let Some(align) = func.alignment {
+        out.push_str(&format!("ALIGN {}\n", align));
+    }
+
+    // PROC header with calling convention + params
+    let cc_str = match func.calling_conv {
+        CallingConv::Stdcall => " STDCALL",
+        CallingConv::Cdecl => " C",
+        CallingConv::Fastcall => " FASTCALL",
+        _ => "",
+    };
+
     // PROC header with params
     if func.params.is_empty() {
-        out.push_str(&format!("{} PROC\n", func.name));
+        out.push_str(&format!("{} PROC{}\n", func.name, cc_str));
     } else {
         let params: Vec<String> = func.params.iter().map(|p| {
             let type_name = size_to_masm_type(p.size);
             format!("{}:{}", p.name, type_name)
         }).collect();
-        out.push_str(&format!("{} PROC {}\n", func.name, params.join(", ")));
+        out.push_str(&format!("{} PROC{} {}\n", func.name, cc_str, params.join(", ")));
     }
 
     // LOCAL declarations
@@ -354,6 +384,9 @@ fn emit_function(out: &mut String, func: &Function, _program: &Program) {
             }
             FunctionItem::Comment(text) => {
                 out.push_str(&format!("    ; {}\n", text));
+            }
+            FunctionItem::RawDirective(line) => {
+                out.push_str(&format!("    {}\n", line));
             }
             FunctionItem::Instruction(instr) => {
                 out.push_str(&format!("    {}\n", emit_instruction(instr)));
@@ -597,12 +630,26 @@ fn emit_data_item(out: &mut String, name: &str, def: &DataDef) {
                     DataDef::Word(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
                     DataDef::Dword(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
                     DataDef::Qword(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
+                    DataDef::Float32(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
+                    DataDef::Float64(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
                     DataDef::String(s) => format!("\"{}\"", s),
                     _ => "?".to_string(),
                 }
             }).collect();
             out.push_str(&field_vals.join(", "));
             out.push_str(">\n");
+        }
+        DataDef::DupByte(n, v) => {
+            out.push_str(&format!("{} BYTE {} DUP({})\n", name, n, v));
+        }
+        DataDef::DupWord(n, v) => {
+            out.push_str(&format!("{} WORD {} DUP({})\n", name, n, v));
+        }
+        DataDef::DupDword(n, v) => {
+            out.push_str(&format!("{} DWORD {} DUP({})\n", name, n, v));
+        }
+        DataDef::DupQword(n, v) => {
+            out.push_str(&format!("{} QWORD {} DUP({})\n", name, n, v));
         }
     }
 }

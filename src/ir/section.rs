@@ -17,6 +17,11 @@ pub enum DataDef {
     Float32(Vec<f32>),
     Float64(Vec<f64>),
     Struct(String, Vec<DataItem>),  // struct instance
+    /// DUP with initial value: DWORD 10 DUP(0)
+    DupByte(usize, u8),
+    DupWord(usize, u16),
+    DupDword(usize, u32),
+    DupQword(usize, u64),
 }
 
 /// A named data item
@@ -36,6 +41,10 @@ impl DataItem {
     pub fn public(name: String, def: DataDef) -> Self {
         Self { name, def, is_pub: true, alignment: None }
     }
+
+    pub fn aligned(name: String, def: DataDef, align: usize) -> Self {
+        Self { name, def, is_pub: false, alignment: Some(align) }
+    }
 }
 
 /// Section types
@@ -48,12 +57,23 @@ pub enum SectionKind {
     Custom(String),
 }
 
+/// Calling convention for functions
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallingConv {
+    Default,    // Win64 fastcall (default for ML64)
+    Stdcall,    // __stdcall (Win32)
+    Fastcall,   // __fastcall (explicit)
+    Cdecl,      // __cdecl (C convention)
+    Naked,      // No prologue/epilogue
+}
+
 /// Struct definition in IR (for data layout)
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: String,
     pub fields: Vec<StructField>,
     pub is_pub: bool,
+    pub alignment: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +81,8 @@ pub struct StructField {
     pub name: String,
     pub size: usize,      // in bytes
     pub offset: usize,    // byte offset from start
+    pub type_name: String, // "BYTE", "WORD", "DWORD", "QWORD", "REAL4", "REAL8"
+    pub init_value: Option<String>, // initial value or "?"
 }
 
 impl StructDef {
@@ -100,6 +122,8 @@ pub struct Function {
     pub naked: bool,
     pub is_inline: bool,
     pub is_extern: bool,
+    pub calling_conv: CallingConv,
+    pub alignment: Option<usize>,
     pub params: Vec<FuncParam>,
     pub local_vars: Vec<LocalVar>,
     pub instructions: Vec<FunctionItem>,
@@ -127,6 +151,8 @@ pub enum FunctionItem {
     Instruction(Instruction),
     Label(String),
     Comment(String),
+    /// Raw MASM directive line (e.g. ALIGN 16)
+    RawDirective(String),
 }
 
 /// A section in the program
@@ -148,7 +174,9 @@ pub struct Program {
     pub enums: Vec<EnumDef>,
     pub constants: Vec<ConstDef>,
     pub externs: Vec<ExternSymbol>,
-    pub uses: Vec<Vec<String>>,  // use paths
+    pub uses: Vec<Vec<String>>,     // use paths
+    pub includes: Vec<String>,      // INCLUDE file.inc
+    pub includelibs: Vec<String>,   // explicit INCLUDELIB
 }
 
 impl Program {
@@ -163,6 +191,8 @@ impl Program {
             constants: Vec::new(),
             externs: Vec::new(),
             uses: Vec::new(),
+            includes: Vec::new(),
+            includelibs: Vec::new(),
         }
     }
 }
