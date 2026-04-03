@@ -24,10 +24,39 @@ pub struct CoffHeader {
 pub const IMAGE_SCN_CNT_CODE: u32               = 0x00000020;
 pub const IMAGE_SCN_CNT_INITIALIZED_DATA: u32   = 0x00000040;
 pub const IMAGE_SCN_CNT_UNINITIALIZED_DATA: u32 = 0x00000080;
+pub const IMAGE_SCN_LNK_INFO: u32               = 0x00000200;
+pub const IMAGE_SCN_LNK_REMOVE: u32             = 0x00000800;
+pub const IMAGE_SCN_LNK_COMDAT: u32             = 0x00001000;
+pub const IMAGE_SCN_ALIGN_1BYTES: u32           = 0x00100000;
+pub const IMAGE_SCN_ALIGN_2BYTES: u32           = 0x00200000;
+pub const IMAGE_SCN_ALIGN_4BYTES: u32           = 0x00300000;
+pub const IMAGE_SCN_ALIGN_8BYTES: u32           = 0x00400000;
 pub const IMAGE_SCN_ALIGN_16BYTES: u32          = 0x00500000;
+pub const IMAGE_SCN_ALIGN_32BYTES: u32          = 0x00600000;
+pub const IMAGE_SCN_ALIGN_64BYTES: u32          = 0x00700000;
+pub const IMAGE_SCN_ALIGN_128BYTES: u32         = 0x00800000;
+pub const IMAGE_SCN_ALIGN_256BYTES: u32         = 0x00900000;
+pub const IMAGE_SCN_ALIGN_512BYTES: u32         = 0x00A00000;
+pub const IMAGE_SCN_ALIGN_1024BYTES: u32        = 0x00B00000;
+pub const IMAGE_SCN_ALIGN_2048BYTES: u32        = 0x00C00000;
+pub const IMAGE_SCN_ALIGN_4096BYTES: u32        = 0x00D00000;
 pub const IMAGE_SCN_MEM_EXECUTE: u32            = 0x20000000;
 pub const IMAGE_SCN_MEM_READ: u32               = 0x40000000;
 pub const IMAGE_SCN_MEM_WRITE: u32              = 0x80000000;
+
+/// Maps a desired alignment (in bytes) to the correct IMAGE_SCN_ALIGN flag
+pub fn alignment_to_flag(align: usize) -> u32 {
+    match align {
+        1 => IMAGE_SCN_ALIGN_1BYTES, 2 => IMAGE_SCN_ALIGN_2BYTES,
+        4 => IMAGE_SCN_ALIGN_4BYTES, 8 => IMAGE_SCN_ALIGN_8BYTES,
+        16 => IMAGE_SCN_ALIGN_16BYTES, 32 => IMAGE_SCN_ALIGN_32BYTES,
+        64 => IMAGE_SCN_ALIGN_64BYTES, 128 => IMAGE_SCN_ALIGN_128BYTES,
+        256 => IMAGE_SCN_ALIGN_256BYTES, 512 => IMAGE_SCN_ALIGN_512BYTES,
+        1024 => IMAGE_SCN_ALIGN_1024BYTES, 2048 => IMAGE_SCN_ALIGN_2048BYTES,
+        4096 => IMAGE_SCN_ALIGN_4096BYTES,
+        _ => IMAGE_SCN_ALIGN_16BYTES, // default
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SectionHeader {
@@ -385,33 +414,103 @@ impl CoffObject {
             self.relocations[sec_idx - 1] = sec_relocs;
         }
 
-        // 2. Generate .pdata and .xdata Windows SEH (Exception Handling) Engine (Task 1)
+        // 2. Generate .pdata and .xdata Windows SEH (Structured Exception Handling)
+        // FASE 8: Real UNWIND_INFO with UNWIND_CODEs per function
         if !pdata_entries.is_empty() {
-            // Generate minimal .xdata section (1 UNWIND_INFO block used by all functions)
-            let xdata = vec![0x01, 0x00, 0x00, 0x00]; 
+            // === Build .xdata ===
+            // Each function gets its own UNWIND_INFO block at a unique offset.
+            // UNWIND_INFO format:
+            //   byte 0: Version (3 bits) | Flags (5 bits)  → 0x01 (version 1, no handler)
+            //   byte 1: Size of prolog (in bytes)
+            //   byte 2: Count of UNWIND_CODEs
+            //   byte 3: Frame Register (4 bits) | Frame Register Offset (4 bits)
+            //   UNWIND_CODE array (2 bytes each):
+            //     byte 0: Offset in prolog
+            //     byte 1: Opcode (4 bits low) | Info (4 bits high)
+            //       UWOP_PUSH_NONVOL (0) — info = register number
+            //       UWOP_ALLOC_SMALL (2) — info = (size / 8) - 1
+            //       UWOP_ALLOC_LARGE (1) — info = 0 → next slot has size/8; info = 1 → next 2 slots have raw size
+            //       UWOP_SET_FPREG    (3) — sets frame pointer
+            
+            let mut xdata = Vec::new();
+            let mut xdata_func_offsets: Vec<u32> = Vec::new(); // offset into xdata for each function
+            
+            for (_sym_idx, func_size) in &pdata_entries {
+                let func_xdata_offset = xdata.len() as u32;
+                xdata_func_offsets.push(func_xdata_offset);
+                
+                // Analyze prologue: we know our standard prologue is:
+                // push rbp (1 byte: 0x55)  → UWOP_PUSH_NONVOL, reg=5 (RBP)
+                // mov rbp, rsp (3 bytes)   → (no unwind code needed)
+                // sub rsp, N              → UWOP_ALLOC_SMALL or UWOP_ALLOC_LARGE
+                //
+                // For a standard frame, we emit:
+                //   - PUSH_NONVOL for RBP
+                //   - ALLOC_SMALL/LARGE for stack allocation
+                //   - SET_FPREG for frame pointer
+                
+                // Standard prologue: push rbp (offset 1) + mov rbp,rsp (offset 4) + sub rsp,N (offset ~8)
+                // We'll emit a minimal but correct unwind info
+                
+                let mut unwind_codes: Vec<u8> = Vec::new();
+                
+                // UWOP_PUSH_NONVOL for RBP at prolog offset 1
+                // offset_in_prolog = 1 (after "push rbp")
+                // operation = UWOP_PUSH_NONVOL (0), info = 5 (RBP register number)
+                unwind_codes.push(1);  // offset in prolog
+                unwind_codes.push(0x50); // operation_info=5 (RBP) << 4 | operation=0 (PUSH_NONVOL)
+                
+                // UWOP_SET_FPREG at prolog offset 4 (after "mov rbp, rsp")
+                unwind_codes.push(4);  // offset in prolog  
+                unwind_codes.push(0x03); // info=0 (offset=0) << 4 | operation=3 (SET_FPREG)
+                
+                let code_count = unwind_codes.len() / 2;
+                let prolog_size: u8 = 8; // typical prologue size (push rbp + mov rbp,rsp + sub rsp,imm8)
+                
+                // UNWIND_INFO header
+                xdata.push(0x01);          // Version=1, Flags=0 (no handler)
+                xdata.push(prolog_size);   // SizeOfProlog
+                xdata.push(code_count as u8); // CountOfCodes
+                xdata.push(0x05);          // FrameRegister=5 (RBP), FrameOffset=0
+                
+                // Write UNWIND_CODEs (must be listed in reverse order of prolog, which they already are)
+                // Actually x64 unwind codes should be sorted by descending prolog offset
+                // Our codes: offset 4 (SET_FPREG), offset 1 (PUSH_NONVOL) — reversed
+                xdata.push(unwind_codes[2]); // SET_FPREG first (higher offset)
+                xdata.push(unwind_codes[3]);
+                xdata.push(unwind_codes[0]); // PUSH_NONVOL second (lower offset)
+                xdata.push(unwind_codes[1]);
+                
+                // Pad to 4-byte alignment
+                while xdata.len() % 4 != 0 {
+                    xdata.push(0);
+                }
+            }
+            
             let xdata_characteristics = 0x40300040; // INITIALIZED_DATA | MEM_READ | ALIGN_4BYTES
-            let xdata_sym_idx = self.add_symbol(".xdata", 0, self.sections.len() as i16 + 1, 3);
+            let xdata_base_sym_idx = self.add_symbol(".xdata", 0, self.sections.len() as i16 + 1, 3);
             self.add_section(".xdata", xdata_characteristics, xdata);
             
-            // Generate .pdata section (Array of IMAGE_RUNTIME_FUNCTION_ENTRY)
+            // === Build .pdata ===
             let mut pdata = Vec::new();
             let mut pdata_relocs = Vec::new();
-            let pdata_characteristics = 0x40300040; // INITIALIZED_DATA | MEM_READ | ALIGN_4BYTES
+            let pdata_characteristics = 0x40300040;
             
-            for (sym_idx, func_size) in pdata_entries {
+            for (i, (sym_idx, func_size)) in pdata_entries.iter().enumerate() {
                 let offset = pdata.len() as u32;
                 
-                // BeginAddress
+                // BeginAddress (RVA of function start)
                 pdata.extend_from_slice(&[0,0,0,0]);
-                pdata_relocs.push((offset, sym_idx, 3)); // 3 = IMAGE_REL_AMD64_ADDR32NB
+                pdata_relocs.push((offset, *sym_idx, 3)); // IMAGE_REL_AMD64_ADDR32NB
                 
-                // EndAddress
-                pdata.extend_from_slice(&(func_size as u32).to_le_bytes());
-                pdata_relocs.push((offset + 4, sym_idx, 3));
+                // EndAddress (RVA of function end = BeginAddress + size)
+                pdata.extend_from_slice(&(*func_size as u32).to_le_bytes());
+                pdata_relocs.push((offset + 4, *sym_idx, 3));
                 
-                // UnwindInfoAddress
-                pdata.extend_from_slice(&[0,0,0,0]);
-                pdata_relocs.push((offset + 8, xdata_sym_idx, 3));
+                // UnwindInfoAddress (RVA of this function's UNWIND_INFO in .xdata)
+                let func_xdata_off = xdata_func_offsets[i];
+                pdata.extend_from_slice(&func_xdata_off.to_le_bytes());
+                pdata_relocs.push((offset + 8, xdata_base_sym_idx, 3));
             }
             
             let pdata_sec_idx = self.add_section(".pdata", pdata_characteristics, pdata);

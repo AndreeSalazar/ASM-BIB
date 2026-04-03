@@ -64,14 +64,18 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
                         let d_info = sib::encode_reg(dst);
                         if let Some(rex) = sib::build_rex(d_info.is_wide, false, false, d_info.is_ext) { bytes.push(rex); }
                         let v = *imm;
-                        if -128 <= v && v <= 127 {
+                        if !d_info.is_8 && -128 <= v && v <= 127 {
                             bytes.push(0x83);
                             bytes.push(sib::modrm(3, sub_op_ext, d_info.val));
                             bytes.push(v as i8 as u8);
+                        } else if d_info.is_8 {
+                            bytes.push(0x80);
+                            bytes.push(sib::modrm(3, sub_op_ext, d_info.val));
+                            bytes.push(v as u8);
                         } else {
-                            if d_info.val == 0 { // special optimized AL/AX/EAX/RAX
-                                bytes.push(if d_info.is_8 { 0x04 | opc_base } else { 0x05 | opc_base });
-                                bytes.extend_from_slice(&(v as i32).to_le_bytes()); // RAX also uses 32bit sign-extended
+                            if d_info.val == 0 {
+                                bytes.push(opc_base + 5);
+                                bytes.extend_from_slice(&(v as i32).to_le_bytes());
                             } else {
                                 bytes.push(0x81);
                                 bytes.push(sib::modrm(3, sub_op_ext, d_info.val));
@@ -82,16 +86,58 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
                     (Operand::Reg(dst), Operand::Reg(src)) => {
                         let d_info = sib::encode_reg(dst);
                         let s_info = sib::encode_reg(src);
-                        // Prefix 0x66 for 16 bit
                         if d_info.is_16 { bytes.push(0x66); }
-                        
-                        let w = if d_info.is_32 || d_info.is_16 || d_info.is_8 { false } else { true };
-                        // optimization: XOR reg, reg (like xor ecx, ecx) drops REX.W
-                        let w_actual = if inst.opcode == Opcode::Xor { false } else { w };
-                        
+                        let w = !d_info.is_8 && !d_info.is_16 && !d_info.is_32;
+                        let w_actual = if inst.opcode == Opcode::Xor && d_info.is_32 { false } else { w };
                         if let Some(rex) = sib::build_rex(w_actual, s_info.is_ext, false, d_info.is_ext) { bytes.push(rex); }
                         bytes.push(opc_base + if d_info.is_8 { 0 } else { 1 });
                         bytes.push(sib::modrm(3, s_info.val, d_info.val));
+                    }
+                    // FASE 7: reg, mem — e.g. add rax, [rbx+8]
+                    (Operand::Reg(dst), Operand::Memory { base, index, scale, disp }) => {
+                        let d_info = sib::encode_reg(dst);
+                        let mem = sib::resolve_memory(d_info.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                        if d_info.is_16 { bytes.push(0x66); }
+                        let w = !d_info.is_8 && !d_info.is_16 && !d_info.is_32;
+                        if let Some(rex) = sib::build_rex(w, d_info.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                        bytes.push(opc_base + if d_info.is_8 { 2 } else { 3 });
+                        bytes.extend(mem.payload);
+                    }
+                    // FASE 7: mem, reg — e.g. add [rsp+0x20], rcx
+                    (Operand::Memory { base, index, scale, disp }, Operand::Reg(src)) => {
+                        let s_info = sib::encode_reg(src);
+                        let mem = sib::resolve_memory(s_info.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                        if s_info.is_16 { bytes.push(0x66); }
+                        let w = !s_info.is_8 && !s_info.is_16 && !s_info.is_32;
+                        if let Some(rex) = sib::build_rex(w, s_info.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                        bytes.push(opc_base + if s_info.is_8 { 0 } else { 1 });
+                        bytes.extend(mem.payload);
+                    }
+                    // FASE 7: mem, imm — e.g. sub DWORD PTR [rsp+4], 1
+                    (Operand::Memory { base, index, scale, disp }, Operand::Imm(imm)) => {
+                        let mem = sib::resolve_memory(sub_op_ext, base.as_ref(), index.as_ref(), *scale, *disp);
+                        // Default to 64-bit wide (REX.W) for mem,imm since no register to infer size
+                        if let Some(rex) = sib::build_rex(true, false, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                        let v = *imm;
+                        if -128 <= v && v <= 127 {
+                            bytes.push(0x83);
+                            bytes.extend(mem.payload);
+                            bytes.push(v as i8 as u8);
+                        } else {
+                            bytes.push(0x81);
+                            bytes.extend(mem.payload);
+                            bytes.extend_from_slice(&(v as i32).to_le_bytes());
+                        }
+                    }
+                    // FASE 7: reg, label (RIP-relative) — e.g. cmp rax, [global_var]
+                    (Operand::Reg(dst), Operand::Label(lbl)) => {
+                        let d_info = sib::encode_reg(dst);
+                        let w = !d_info.is_8 && !d_info.is_16 && !d_info.is_32;
+                        if let Some(rex) = sib::build_rex(w, d_info.is_ext, false, false) { bytes.push(rex); }
+                        bytes.push(opc_base + if d_info.is_8 { 2 } else { 3 });
+                        bytes.push(sib::modrm(0, d_info.val, 5));
+                        bytes.extend_from_slice(&[0,0,0,0]);
+                        relocations.push(RelocationReq { offset: bytes.len() as u32 - 4, symbol: lbl.clone(), rel_type: 4 });
                     }
                     _ => {}
                 }
@@ -172,9 +218,27 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
                         let w = !s_info.is_8 && !s_info.is_16 && !s_info.is_32;
                         if let Some(rex) = sib::build_rex(w, s_info.is_ext, false, false) { bytes.push(rex); }
                         bytes.push(if s_info.is_8 { 0x88 } else { 0x89 });
-                        bytes.push(sib::modrm(0, s_info.val, 5)); // RIP relative
+                        bytes.push(sib::modrm(0, s_info.val, 5));
                         bytes.extend_from_slice(&[0,0,0,0]);
                         relocations.push(RelocationReq { offset: bytes.len() as u32 - 4, symbol: lbl.clone(), rel_type: 4 });
+                    }
+                    // FASE 7: MOV mem, imm — e.g. mov QWORD PTR [rsp+8], 0
+                    (Operand::Memory { base, index, scale, disp }, Operand::Imm(imm)) => {
+                        let mem = sib::resolve_memory(0, base.as_ref(), index.as_ref(), *scale, *disp);
+                        // Default to 64-bit (REX.W) for mem,imm stores
+                        if let Some(rex) = sib::build_rex(true, false, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                        bytes.push(0xC7);
+                        bytes.extend(mem.payload);
+                        bytes.extend_from_slice(&(*imm as i32).to_le_bytes());
+                    }
+                    // FASE 7: MOV label, imm — e.g. mov [global_var], 42
+                    (Operand::Label(lbl), Operand::Imm(imm)) => {
+                        if let Some(rex) = sib::build_rex(true, false, false, false) { bytes.push(rex); }
+                        bytes.push(0xC7);
+                        bytes.push(sib::modrm(0, 0, 5));
+                        bytes.extend_from_slice(&[0,0,0,0]);
+                        relocations.push(RelocationReq { offset: bytes.len() as u32 - 4, symbol: lbl.clone(), rel_type: 4 });
+                        bytes.extend_from_slice(&(*imm as i32).to_le_bytes());
                     }
                     _ => {}
                 }
@@ -243,6 +307,15 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
                     bytes.push(sib::modrm(0, d_info.val, 5)); // RIP-relative Reg, 101
                     bytes.extend_from_slice(&[0,0,0,0]);
                     relocations.push(RelocationReq { offset: bytes.len() as u32 - 4, symbol: lbl.clone(), rel_type: 4 });
+                }
+            // FASE 7: MOVSS mem, xmm — F3 0F 11 (store direction)
+            } else if let (Some(Operand::Memory { base, index, scale, disp }), Some(Operand::Reg(src))) = (inst.operands.get(0), inst.operands.get(1)) {
+                if inst.opcode == Opcode::Movss {
+                    let s_info = sib::encode_reg(src);
+                    let mem = sib::resolve_memory(s_info.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                    if let Some(rex) = sib::build_rex(false, s_info.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                    bytes.push(0x0F); bytes.push(0x11); // store opcode
+                    bytes.extend(mem.payload);
                 }
             }
         }
@@ -325,17 +398,93 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
             }
         }
         Opcode::Imul => {
-            if let (Some(Operand::Reg(d)), Some(Operand::Reg(s))) = (inst.operands.get(0), inst.operands.get(1)) {
-                let di = sib::encode_reg(d); let si = sib::encode_reg(s);
-                if let Some(rex) = sib::build_rex(di.is_wide, di.is_ext, false, si.is_ext) { bytes.push(rex); }
-                bytes.push(0x0F); bytes.push(0xAF); bytes.push(sib::modrm(3, di.val, si.val));
+            if inst.operands.len() == 3 {
+                // FASE 7: IMUL reg, reg, imm (3-operand) — 6B/69
+                if let (Some(Operand::Reg(d)), Some(Operand::Reg(s)), Some(Operand::Imm(imm))) =
+                    (inst.operands.get(0), inst.operands.get(1), inst.operands.get(2)) {
+                    let di = sib::encode_reg(d); let si = sib::encode_reg(s);
+                    if let Some(rex) = sib::build_rex(di.is_wide, di.is_ext, false, si.is_ext) { bytes.push(rex); }
+                    let v = *imm;
+                    if -128 <= v && v <= 127 {
+                        bytes.push(0x6B);
+                        bytes.push(sib::modrm(3, di.val, si.val));
+                        bytes.push(v as i8 as u8);
+                    } else {
+                        bytes.push(0x69);
+                        bytes.push(sib::modrm(3, di.val, si.val));
+                        bytes.extend_from_slice(&(v as i32).to_le_bytes());
+                    }
+                }
+            } else if inst.operands.len() == 2 {
+                if let (Some(Operand::Reg(d)), Some(Operand::Reg(s))) = (inst.operands.get(0), inst.operands.get(1)) {
+                    // IMUL reg, reg — 0F AF /r
+                    let di = sib::encode_reg(d); let si = sib::encode_reg(s);
+                    if let Some(rex) = sib::build_rex(di.is_wide, di.is_ext, false, si.is_ext) { bytes.push(rex); }
+                    bytes.push(0x0F); bytes.push(0xAF); bytes.push(sib::modrm(3, di.val, si.val));
+                } else if let (Some(Operand::Reg(d)), Some(Operand::Memory { base, index, scale, disp })) = (inst.operands.get(0), inst.operands.get(1)) {
+                    // IMUL reg, mem — 0F AF /r
+                    let di = sib::encode_reg(d);
+                    let mem = sib::resolve_memory(di.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                    if let Some(rex) = sib::build_rex(di.is_wide, di.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                    bytes.push(0x0F); bytes.push(0xAF);
+                    bytes.extend(mem.payload);
+                } else if let (Some(Operand::Reg(d)), Some(Operand::Imm(imm))) = (inst.operands.get(0), inst.operands.get(1)) {
+                    // IMUL reg, imm — same as IMUL reg, reg, imm with dst=src
+                    let di = sib::encode_reg(d);
+                    if let Some(rex) = sib::build_rex(di.is_wide, di.is_ext, false, di.is_ext) { bytes.push(rex); }
+                    let v = *imm;
+                    if -128 <= v && v <= 127 {
+                        bytes.push(0x6B);
+                        bytes.push(sib::modrm(3, di.val, di.val));
+                        bytes.push(v as i8 as u8);
+                    } else {
+                        bytes.push(0x69);
+                        bytes.push(sib::modrm(3, di.val, di.val));
+                        bytes.extend_from_slice(&(v as i32).to_le_bytes());
+                    }
+                }
+            } else if inst.operands.len() == 1 {
+                // IMUL reg (single operand: RDX:RAX = RAX * reg) — F7 /5
+                if let Some(Operand::Reg(r)) = inst.operands.get(0) {
+                    let ri = sib::encode_reg(r);
+                    if let Some(rex) = sib::build_rex(ri.is_wide, false, false, ri.is_ext) { bytes.push(rex); }
+                    bytes.push(0xF7); bytes.push(sib::modrm(3, 5, ri.val));
+                }
             }
         }
         Opcode::Test => {
-            if let (Some(Operand::Reg(d)), Some(Operand::Reg(s))) = (inst.operands.get(0), inst.operands.get(1)) {
-                let di = sib::encode_reg(d); let si = sib::encode_reg(s);
-                if let Some(rex) = sib::build_rex(di.is_wide, si.is_ext, false, di.is_ext) { bytes.push(rex); }
-                bytes.push(0x85); bytes.push(sib::modrm(3, si.val, di.val));
+            if let (Some(Operand::Reg(d)), Some(src)) = (inst.operands.get(0), inst.operands.get(1)) {
+                let di = sib::encode_reg(d);
+                match src {
+                    Operand::Reg(s) => {
+                        let si = sib::encode_reg(s);
+                        if let Some(rex) = sib::build_rex(di.is_wide, si.is_ext, false, di.is_ext) { bytes.push(rex); }
+                        bytes.push(if di.is_8 { 0x84 } else { 0x85 });
+                        bytes.push(sib::modrm(3, si.val, di.val));
+                    }
+                    // FASE 7: TEST reg, imm — F7 /0 (or A9 for RAX)
+                    Operand::Imm(imm) => {
+                        let v = *imm;
+                        if let Some(rex) = sib::build_rex(di.is_wide, false, false, di.is_ext) { bytes.push(rex); }
+                        if di.val == 0 {
+                            // Optimized: TEST AL/EAX/RAX, imm
+                            bytes.push(if di.is_8 { 0xA8 } else { 0xA9 });
+                        } else {
+                            bytes.push(if di.is_8 { 0xF6 } else { 0xF7 });
+                            bytes.push(sib::modrm(3, 0, di.val));
+                        }
+                        if di.is_8 { bytes.push(v as u8); }
+                        else { bytes.extend_from_slice(&(v as i32).to_le_bytes()); }
+                    }
+                    // FASE 7: TEST mem, reg
+                    Operand::Memory { base, index, scale, disp } => {
+                        let mem = sib::resolve_memory(di.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                        if let Some(rex) = sib::build_rex(di.is_wide, di.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                        bytes.push(if di.is_8 { 0x84 } else { 0x85 });
+                        bytes.extend(mem.payload);
+                    }
+                    _ => {}
+                }
             }
         }
         // === FASE 3: Core MSVC Completeness ===
@@ -791,6 +940,19 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
                 if let Some(rex) = sib::build_rex(false, di.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
                 bytes.push(0x0F); bytes.push(op2);
                 bytes.extend(mem.payload);
+            // FASE 7: SSE store — mem, xmm (MOVAPS→0x29, MOVUPS→0x11)
+            } else if let (Some(Operand::Memory { base, index, scale, disp }), Some(Operand::Reg(s))) = (inst.operands.get(0), inst.operands.get(1)) {
+                let si = sib::encode_reg(s);
+                let mem = sib::resolve_memory(si.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                if let Some(rex) = sib::build_rex(false, si.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                bytes.push(0x0F);
+                // Store opcodes: MOVAPS→0x29, MOVUPS→0x11, others are not stores
+                let store_op = match inst.opcode {
+                    Opcode::Movaps => 0x29, Opcode::Movups => 0x11,
+                    _ => op2, // fallback to same opcode
+                };
+                bytes.push(store_op);
+                bytes.extend(mem.payload);
             }
         }
 
@@ -830,6 +992,16 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
                 bytes.push(sib::modrm(0, di.val, 5));
                 bytes.extend_from_slice(&[0,0,0,0]);
                 relocations.push(RelocationReq { offset: bytes.len() as u32 - 4, symbol: lbl.clone(), rel_type: 4 });
+            // FASE 7: MOVSD mem, xmm — F2 0F 11 (store direction)
+            } else if let (Some(Operand::Memory { base, index, scale, disp }), Some(Operand::Reg(s))) = (inst.operands.get(0), inst.operands.get(1)) {
+                if inst.opcode == Opcode::Movsd2 {
+                    let si = sib::encode_reg(s);
+                    let mem = sib::resolve_memory(si.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                    bytes.push(0xF2);
+                    if let Some(rex) = sib::build_rex(false, si.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                    bytes.push(0x0F); bytes.push(0x11);
+                    bytes.extend(mem.payload);
+                }
             }
         }
 
@@ -858,6 +1030,19 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
                 let mem = sib::resolve_memory(di.val, base.as_ref(), index.as_ref(), *scale, *disp);
                 if let Some(rex) = sib::build_rex(false, di.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
                 bytes.push(0x0F); bytes.push(op2);
+                bytes.extend(mem.payload);
+            // FASE 7: SSE2 packed double store — mem, xmm (MOVAPD→0x29, MOVUPD→0x11)
+            } else if let (Some(Operand::Memory { base, index, scale, disp }), Some(Operand::Reg(s))) = (inst.operands.get(0), inst.operands.get(1)) {
+                let si = sib::encode_reg(s);
+                let mem = sib::resolve_memory(si.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                bytes.push(0x66);
+                if let Some(rex) = sib::build_rex(false, si.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                bytes.push(0x0F);
+                let store_op = match inst.opcode {
+                    Opcode::Movapd => 0x29, Opcode::Movupd => 0x11,
+                    _ => op2,
+                };
+                bytes.push(store_op);
                 bytes.extend(mem.payload);
             }
         }
@@ -896,6 +1081,16 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
                 if inst.opcode == Opcode::Pmulld { bytes.push(0x0F); bytes.push(0x38); } else { bytes.push(0x0F); }
                 bytes.push(op2);
                 bytes.extend(mem.payload);
+            // FASE 7: SSE2 integer store — mem, xmm (MOVDQA→66 0F 7F, MOVDQU→F3 0F 7F)
+            } else if let (Some(Operand::Memory { base, index, scale, disp }), Some(Operand::Reg(s))) = (inst.operands.get(0), inst.operands.get(1)) {
+                if inst.opcode == Opcode::Movdqa || inst.opcode == Opcode::Movdqu {
+                    let si = sib::encode_reg(s);
+                    let mem = sib::resolve_memory(si.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                    if inst.opcode == Opcode::Movdqu { bytes.push(0xF3); } else { bytes.push(0x66); }
+                    if let Some(rex) = sib::build_rex(false, si.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                    bytes.push(0x0F); bytes.push(0x7F); // store opcode
+                    bytes.extend(mem.payload);
+                }
             }
         }
 
