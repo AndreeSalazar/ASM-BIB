@@ -13,7 +13,7 @@ impl ArchEncoder for X86_64Encoder {
         Ok(())
     }
     
-    fn encode(&self, inst: &Instruction) -> Result<Vec<u8>, String> {
+    fn encode(&self, inst: &Instruction) -> Result<crate::targets::x86_64::encoder::EncodedInstruction, String> {
         encoder::encode_instruction(inst)
     }
 

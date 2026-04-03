@@ -61,8 +61,9 @@ fn rex(w: bool, r: bool, x: bool, b: bool) -> u8 {
 }
 
 /// Translate IR to Machine Code
-pub fn encode_instruction(inst: &Instruction) -> Result<Vec<u8>, String> {
+pub fn encode_instruction(inst: &Instruction) -> Result<EncodedInstruction, String> {
     let mut bytes = Vec::new();
+    let mut relocations = Vec::new();
     
     // Simplistic structure logic for core instructions needed in `complete_demo.pasm`
     match inst.opcode {
@@ -127,9 +128,23 @@ pub fn encode_instruction(inst: &Instruction) -> Result<Vec<u8>, String> {
                 }
             }
         }
+        Opcode::Call => {
+            if let Some(Operand::Label(sym)) = inst.operands.get(0) {
+                // E8 call rel32
+                bytes.push(0xE8);
+                bytes.extend_from_slice(&[0, 0, 0, 0]); // Blank offset for linker
+                relocations.push(RelocationReq {
+                    offset: 1, // After E8 byte
+                    symbol: sym.clone(),
+                    rel_type: 0x0004, // IMAGE_REL_AMD64_REL32
+                });
+            } else {
+                return Err("Unsupported call operand".into());
+            }
+        }
         // Basic integration hook, the rest of the opcodes...
         _ => return Err(format!("Unimplemented binary encoding for {:?}", inst.opcode)),
     }
     
-    Ok(bytes)
+    Ok(EncodedInstruction { bytes, relocations })
 }
