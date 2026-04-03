@@ -23,6 +23,7 @@ pub enum Opcode {
 
     // === String ops ===
     RepMovsb, RepStosb, Scasb,
+    RepeCmpsb, RepneScasb, Movsb, Stosb, Cmpsb,
 
     // === System ===
     Syscall, Int, Hlt, Cli, Sti, Nop, Cpuid, Iretq,
@@ -32,6 +33,26 @@ pub enum Opcode {
 
     // === AVX ===
     Vmovaps, Vaddps, Vmulps,
+
+    // === AVX extended ===
+    Vsubps, Vdivps, Vxorps,
+
+    // === SSE scalar ===
+    Movss, Addss, Subss, Mulss, Divss, Sqrtss,
+    Movsd, Addsd, Subsd, Mulsd, Divsd, Sqrtsd,
+    Comiss, Comisd,
+
+    // === SSE packed extra ===
+    Subps, Divps, Minps, Maxps,
+
+    // === Conditional moves ===
+    Cmove, Cmovne, Cmovl, Cmovle, Cmovg, Cmovge, Cmovb, Cmova,
+
+    // === Bit scan ===
+    Bsf, Bsr,
+
+    // === Misc ===
+    Cqo, Cdq, Cbw,
 }
 
 impl Opcode {
@@ -70,6 +91,11 @@ impl Opcode {
             "rep movsb" => Some(Opcode::RepMovsb),
             "rep stosb" => Some(Opcode::RepStosb),
             "scasb" => Some(Opcode::Scasb),
+            "repe cmpsb" => Some(Opcode::RepeCmpsb),
+            "repne scasb" => Some(Opcode::RepneScasb),
+            "movsb" => Some(Opcode::Movsb),
+            "stosb" => Some(Opcode::Stosb),
+            "cmpsb" => Some(Opcode::Cmpsb),
             // System
             "syscall" => Some(Opcode::Syscall), "int" => Some(Opcode::Int),
             "hlt" => Some(Opcode::Hlt), "cli" => Some(Opcode::Cli),
@@ -82,6 +108,40 @@ impl Opcode {
             // AVX
             "vmovaps" => Some(Opcode::Vmovaps), "vaddps" => Some(Opcode::Vaddps),
             "vmulps" => Some(Opcode::Vmulps),
+            "vsubps" => Some(Opcode::Vsubps),
+            "vdivps" => Some(Opcode::Vdivps),
+            "vxorps" => Some(Opcode::Vxorps),
+            "movss" => Some(Opcode::Movss),
+            "addss" => Some(Opcode::Addss),
+            "subss" => Some(Opcode::Subss),
+            "mulss" => Some(Opcode::Mulss),
+            "divss" => Some(Opcode::Divss),
+            "sqrtss" => Some(Opcode::Sqrtss),
+            "movsd" => Some(Opcode::Movsd),
+            "addsd" => Some(Opcode::Addsd),
+            "subsd" => Some(Opcode::Subsd),
+            "mulsd" => Some(Opcode::Mulsd),
+            "divsd" => Some(Opcode::Divsd),
+            "sqrtsd" => Some(Opcode::Sqrtsd),
+            "comiss" => Some(Opcode::Comiss),
+            "comisd" => Some(Opcode::Comisd),
+            "subps" => Some(Opcode::Subps),
+            "divps" => Some(Opcode::Divps),
+            "minps" => Some(Opcode::Minps),
+            "maxps" => Some(Opcode::Maxps),
+            "cmove" | "cmovz" => Some(Opcode::Cmove),
+            "cmovne" | "cmovnz" => Some(Opcode::Cmovne),
+            "cmovl" => Some(Opcode::Cmovl),
+            "cmovle" => Some(Opcode::Cmovle),
+            "cmovg" => Some(Opcode::Cmovg),
+            "cmovge" => Some(Opcode::Cmovge),
+            "cmovb" => Some(Opcode::Cmovb),
+            "cmova" => Some(Opcode::Cmova),
+            "bsf" => Some(Opcode::Bsf),
+            "bsr" => Some(Opcode::Bsr),
+            "cqo" => Some(Opcode::Cqo),
+            "cdq" => Some(Opcode::Cdq),
+            "cbw" => Some(Opcode::Cbw),
             _ => None,
         }
     }
@@ -125,6 +185,23 @@ impl Opcode {
             Opcode::Addps => "addps", Opcode::Mulps => "mulps", Opcode::Xorps => "xorps",
             // AVX
             Opcode::Vmovaps => "vmovaps", Opcode::Vaddps => "vaddps", Opcode::Vmulps => "vmulps",
+            Opcode::RepeCmpsb => "repe cmpsb",
+            Opcode::RepneScasb => "repne scasb",
+            Opcode::Movsb => "movsb", Opcode::Stosb => "stosb", Opcode::Cmpsb => "cmpsb",
+            Opcode::Vsubps => "vsubps", Opcode::Vdivps => "vdivps", Opcode::Vxorps => "vxorps",
+            Opcode::Movss => "movss", Opcode::Addss => "addss", Opcode::Subss => "subss",
+            Opcode::Mulss => "mulss", Opcode::Divss => "divss", Opcode::Sqrtss => "sqrtss",
+            Opcode::Movsd => "movsd", Opcode::Addsd => "addsd", Opcode::Subsd => "subsd",
+            Opcode::Mulsd => "mulsd", Opcode::Divsd => "divsd", Opcode::Sqrtsd => "sqrtsd",
+            Opcode::Comiss => "comiss", Opcode::Comisd => "comisd",
+            Opcode::Subps => "subps", Opcode::Divps => "divps",
+            Opcode::Minps => "minps", Opcode::Maxps => "maxps",
+            Opcode::Cmove => "cmove", Opcode::Cmovne => "cmovne",
+            Opcode::Cmovl => "cmovl", Opcode::Cmovle => "cmovle",
+            Opcode::Cmovg => "cmovg", Opcode::Cmovge => "cmovge",
+            Opcode::Cmovb => "cmovb", Opcode::Cmova => "cmova",
+            Opcode::Bsf => "bsf", Opcode::Bsr => "bsr",
+            Opcode::Cqo => "cqo", Opcode::Cdq => "cdq", Opcode::Cbw => "cbw",
         }
     }
 }

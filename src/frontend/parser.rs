@@ -8,14 +8,26 @@ use crate::ir::{
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
-    print_counter: usize,
+    auto_counter: usize,
     pending_data: Vec<DataItem>,
     format: String,
+    if_stack: Vec<(String, String)>,
+    loop_stack: Vec<(String, String)>,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0, print_counter: 0, pending_data: Vec::new(), format: "elf".to_string() }
+        Self {
+            tokens, pos: 0, auto_counter: 0,
+            pending_data: Vec::new(), format: "elf".to_string(),
+            if_stack: Vec::new(), loop_stack: Vec::new(),
+        }
+    }
+
+    fn next_label(&mut self, prefix: &str) -> String {
+        let l = format!("__{}{}", prefix, self.auto_counter);
+        self.auto_counter += 1;
+        l
     }
 
     fn peek(&self) -> &Token {
@@ -314,22 +326,138 @@ impl Parser {
                 Token::At => {
                     self.advance(); // @
                     let dir = self.expect_ident()?;
-                    if dir == "label" {
-                        self.expect_lparen()?;
-                        let name = self.expect_string_or_ident()?;
-                        self.expect_rparen()?;
-                        items.push(FunctionItem::Label(name));
-                    } else {
-                        self.skip_to_newline();
+                    match dir.as_str() {
+                        "label" => {
+                            self.expect_lparen()?;
+                            let name = self.expect_string_or_ident()?;
+                            self.expect_rparen()?;
+                            items.push(FunctionItem::Label(name));
+                        }
+                        "if" => {
+                            // @if(reg, op, val) → cmp + conditional jump
+                            self.expect_lparen()?;
+                            let lhs = self.expect_string_or_ident()?;
+                            self.expect_comma()?;
+                            let op = self.expect_operator()?;
+                            self.expect_comma()?;
+                            let rhs = self.parse_expr()?;
+                            self.expect_rparen()?;
+
+                            let else_lbl = self.next_label("else_");
+                            let endif_lbl = self.next_label("endif_");
+                            self.if_stack.push((else_lbl.clone(), endif_lbl));
+
+                            let lhs_op = self.ident_to_operand(&lhs);
+                            let rhs_op = self.expr_to_operand(&rhs);
+                            items.push(FunctionItem::Instruction(Instruction::two(Opcode::Cmp, lhs_op, rhs_op)));
+
+                            let jcc = match op.as_str() {
+                                "==" | "eq" => Opcode::Jne,
+                                "!=" | "ne" => Opcode::Je,
+                                "<" | "lt"  => Opcode::Jge,
+                                "<=" | "le" => Opcode::Jg,
+                                ">" | "gt"  => Opcode::Jge,
+                                ">=" | "ge" => Opcode::Jl,
+                                _ => Opcode::Jne,
+                            };
+                            // Jump to else/endif if condition is FALSE
+                            items.push(FunctionItem::Instruction(Instruction::one(jcc, Operand::Label(else_lbl))));
+                        }
+                        "else" => {
+                            if let Some((else_lbl, endif_lbl)) = self.if_stack.last() {
+                                let endif = endif_lbl.clone();
+                                let else_l = else_lbl.clone();
+                                items.push(FunctionItem::Instruction(Instruction::one(Opcode::Jmp, Operand::Label(endif))));
+                                items.push(FunctionItem::Label(else_l));
+                            }
+                        }
+                        "endif" => {
+                            if let Some((else_lbl, endif_lbl)) = self.if_stack.pop() {
+                                // If no @else was used, the else label still needs to land here
+                                items.push(FunctionItem::Label(else_lbl));
+                                items.push(FunctionItem::Label(endif_lbl));
+                            }
+                        }
+                        "loop" => {
+                            // @loop(reg, count) → mov reg, count; label:
+                            self.expect_lparen()?;
+                            let reg_name = self.expect_string_or_ident()?;
+                            self.expect_comma()?;
+                            let count = self.parse_expr()?;
+                            self.expect_rparen()?;
+
+                            let start_lbl = self.next_label("loop_");
+                            let end_lbl = self.next_label("loopend_");
+                            self.loop_stack.push((start_lbl.clone(), end_lbl));
+
+                            let reg_op = self.ident_to_operand(&reg_name);
+                            let count_op = self.expr_to_operand(&count);
+                            items.push(FunctionItem::Instruction(Instruction::two(Opcode::Mov, reg_op, count_op)));
+                            items.push(FunctionItem::Label(start_lbl));
+                        }
+                        "endloop" => {
+                            if let Some((start_lbl, end_lbl)) = self.loop_stack.pop() {
+                                items.push(FunctionItem::Instruction(Instruction::two(Opcode::Sub, Operand::Reg(Register::Rcx), Operand::Imm(1))));
+                                items.push(FunctionItem::Instruction(Instruction::one(Opcode::Jne, Operand::Label(start_lbl))));
+                                items.push(FunctionItem::Label(end_lbl));
+                            }
+                        }
+                        "while" => {
+                            // @while(reg, op, val) → label: cmp; jcc end
+                            self.expect_lparen()?;
+                            let lhs = self.expect_string_or_ident()?;
+                            self.expect_comma()?;
+                            let op_str = self.expect_operator()?;
+                            self.expect_comma()?;
+                            let rhs = self.parse_expr()?;
+                            self.expect_rparen()?;
+
+                            let start_lbl = self.next_label("while_");
+                            let end_lbl = self.next_label("wend_");
+                            self.loop_stack.push((start_lbl.clone(), end_lbl.clone()));
+
+                            items.push(FunctionItem::Label(start_lbl));
+                            let lhs_op = self.ident_to_operand(&lhs);
+                            let rhs_op = self.expr_to_operand(&rhs);
+                            items.push(FunctionItem::Instruction(Instruction::two(Opcode::Cmp, lhs_op, rhs_op)));
+
+                            let jcc = match op_str.as_str() {
+                                "==" | "eq" => Opcode::Jne,
+                                "!=" | "ne" => Opcode::Je,
+                                "<" | "lt"  => Opcode::Jge,
+                                ">" | "gt"  => Opcode::Jle,
+                                _ => Opcode::Jne,
+                            };
+                            items.push(FunctionItem::Instruction(Instruction::one(jcc, Operand::Label(end_lbl))));
+                        }
+                        "endwhile" => {
+                            if let Some((start_lbl, end_lbl)) = self.loop_stack.pop() {
+                                items.push(FunctionItem::Instruction(Instruction::one(Opcode::Jmp, Operand::Label(start_lbl))));
+                                items.push(FunctionItem::Label(end_lbl));
+                            }
+                        }
+                        "break" => {
+                            if let Some((_, end_lbl)) = self.loop_stack.last() {
+                                let end = end_lbl.clone();
+                                items.push(FunctionItem::Instruction(Instruction::one(Opcode::Jmp, Operand::Label(end))));
+                            }
+                        }
+                        "continue" => {
+                            if let Some((start_lbl, _)) = self.loop_stack.last() {
+                                let start = start_lbl.clone();
+                                items.push(FunctionItem::Instruction(Instruction::one(Opcode::Jmp, Operand::Label(start))));
+                            }
+                        }
+                        _ => { self.skip_to_newline(); }
                     }
                 }
                 Token::Ident(_) => {
                     let name = if let Token::Ident(s) = self.advance() { s } else { unreachable!() };
 
-                    // Handle compound instructions like "rep movsb", "rep stosb"
-                    let final_name = if name == "rep" {
+                    // Handle compound instructions like "rep movsb", "rep stosb", "repe cmpsb"
+                    let final_name = if name == "rep" || name == "repe" || name == "repne" {
                         if let Token::Ident(ref suffix) = *self.peek() {
-                            let compound = format!("rep {}", suffix);
+                            let compound = format!("{} {}", name, suffix);
                             self.advance();
                             compound
                         } else {
@@ -339,27 +467,19 @@ impl Parser {
                         name
                     };
 
-                    if final_name == "print" && matches!(self.peek(), Token::LParen) {
+                    if matches!(self.peek(), Token::LParen) {
                         let args = self.parse_call_args()?;
-                        let expanded = self.expand_print(&args)?;
-                        for inst in expanded {
+                        if let Some(expanded) = self.try_expand_builtin(&final_name, &args)? {
+                            for item in expanded {
+                                items.push(item);
+                            }
+                        } else {
+                            let inst = self.build_instruction(&final_name, &args)?;
                             items.push(FunctionItem::Instruction(inst));
                         }
-                    } else if final_name == "exit" && matches!(self.peek(), Token::LParen) {
-                        let args = self.parse_call_args()?;
-                        let expanded = self.expand_exit(&args)?;
-                        for inst in expanded {
-                            items.push(FunctionItem::Instruction(inst));
-                        }
-                    } else if matches!(self.peek(), Token::LParen) {
-                        let args = self.parse_call_args()?;
-                        let inst = self.build_instruction(&final_name, &args)?;
-                        items.push(FunctionItem::Instruction(inst));
                     } else if matches!(self.peek(), Token::Equals) {
-                        // skip in-function data for now
                         self.skip_to_newline();
                     } else {
-                        // bare instruction with no args (like ret, nop, etc.)
                         if let Some(opcode) = Opcode::from_str(&final_name) {
                             items.push(FunctionItem::Instruction(Instruction::zero(opcode)));
                         }
@@ -616,6 +736,60 @@ impl Parser {
                 let n = args.first().and_then(|a| if let Expr::Immediate(v) = a { Some(*v as usize) } else { None }).unwrap_or(1);
                 DataDef::ReserveQwords(n)
             }
+            // Signed type aliases (same storage, semantic sugar)
+            "sbyte" | "int8" => {
+                let args = self.parse_call_args()?;
+                let vals: Vec<u8> = args.iter().filter_map(|a| {
+                    if let Expr::Immediate(v) = a { Some(*v as u8) } else { None }
+                }).collect();
+                DataDef::Byte(vals)
+            }
+            "sword" | "int16" => {
+                let args = self.parse_call_args()?;
+                let vals: Vec<u16> = args.iter().filter_map(|a| {
+                    if let Expr::Immediate(v) = a { Some(*v as u16) } else { None }
+                }).collect();
+                DataDef::Word(vals)
+            }
+            "sdword" | "int32" => {
+                let args = self.parse_call_args()?;
+                let vals: Vec<u32> = args.iter().filter_map(|a| {
+                    if let Expr::Immediate(v) = a { Some(*v as u32) } else { None }
+                }).collect();
+                DataDef::Dword(vals)
+            }
+            "sqword" | "int64" => {
+                let args = self.parse_call_args()?;
+                let vals: Vec<u64> = args.iter().filter_map(|a| {
+                    if let Expr::Immediate(v) = a { Some(*v as u64) } else { None }
+                }).collect();
+                DataDef::Qword(vals)
+            }
+            "array" => {
+                // array(type, count) → generates N DUP(0)
+                let args = self.parse_call_args()?;
+                let type_str = match args.first() {
+                    Some(Expr::Label(s)) => s.as_str(),
+                    _ => "byte",
+                };
+                let count = match args.get(1) {
+                    Some(Expr::Immediate(v)) => *v as usize,
+                    _ => 1,
+                };
+                match type_str {
+                    "byte" | "sbyte" => DataDef::ReserveBytes(count),
+                    "word" | "sword" => DataDef::ReserveWords(count),
+                    "dword" | "sdword" => DataDef::ReserveDwords(count),
+                    "qword" | "sqword" => DataDef::ReserveQwords(count),
+                    _ => DataDef::ReserveBytes(count),
+                }
+            }
+            "buffer" => {
+                // buffer(size) → BYTE size DUP(?)
+                let args = self.parse_call_args()?;
+                let n = args.first().and_then(|a| if let Expr::Immediate(v) = a { Some(*v as usize) } else { None }).unwrap_or(256);
+                DataDef::ReserveBytes(n)
+            }
             _ => return Err(format!("unknown data type: {}", type_name)),
         };
 
@@ -624,79 +798,296 @@ impl Parser {
 
     // ── High-level builtins ────────────────────────────────────────────
 
+    fn ident_to_operand(&self, name: &str) -> Operand {
+        Register::from_str(name)
+            .map(Operand::Reg)
+            .unwrap_or_else(|| Operand::Label(name.to_string()))
+    }
+
+    fn win64_call(&self, func: &str, args: &[Operand]) -> Vec<Instruction> {
+        let regs = [Register::Rcx, Register::Rdx, Register::R8, Register::R9];
+        let mut v = vec![Instruction::two(Opcode::Sub, Operand::Reg(Register::Rsp), Operand::Imm(40))];
+        for (i, arg) in args.iter().enumerate().take(4) {
+            match arg {
+                Operand::Label(_) => v.push(Instruction::two(Opcode::Lea, Operand::Reg(regs[i].clone()), arg.clone())),
+                _ => v.push(Instruction::two(Opcode::Mov, Operand::Reg(regs[i].clone()), arg.clone())),
+            }
+        }
+        v.push(Instruction::one(Opcode::Call, Operand::Label(func.to_string())));
+        v.push(Instruction::two(Opcode::Add, Operand::Reg(Register::Rsp), Operand::Imm(40)));
+        v
+    }
+
+    fn try_expand_builtin(&mut self, name: &str, args: &[Expr]) -> Result<Option<Vec<FunctionItem>>, String> {
+        let insts = match name {
+            "print"   => Some(self.expand_print(args)?),
+            "exit"    => Some(self.expand_exit(args)?),
+            "printf"  => Some(self.expand_printf(args)?),
+            "input"   => Some(self.expand_input(args)?),
+            "alloc"   => Some(self.expand_alloc(args)?),
+            "free"    => Some(self.expand_free(args)?),
+            "memcpy"  => Some(self.expand_memcpy(args)?),
+            "memset"  => Some(self.expand_memset(args)?),
+            "memcmp"  => Some(self.expand_crt3("memcmp", args)?),
+            "strlen"  => Some(self.expand_crt1("strlen", args)?),
+            "strcpy"  => Some(self.expand_crt2("strcpy", args)?),
+            "strcmp"   => Some(self.expand_crt2("strcmp", args)?),
+            "strcat"  => Some(self.expand_crt2("strcat", args)?),
+            "abs"     => Some(self.expand_abs(args)?),
+            "min"     => Some(self.expand_minmax(args, true)?),
+            "max"     => Some(self.expand_minmax(args, false)?),
+            "sqrt"    => Some(self.expand_sqrt(args)?),
+            "vec_add" => Some(self.expand_simd(Opcode::Vaddps, args)?),
+            "vec_mul" => Some(self.expand_simd(Opcode::Vmulps, args)?),
+            "vec_sub" => Some(self.expand_simd(Opcode::Vsubps, args)?),
+            "vec_div" => Some(self.expand_simd(Opcode::Vdivps, args)?),
+            _ => None,
+        };
+        Ok(insts.map(|v| v.into_iter().map(FunctionItem::Instruction).collect()))
+    }
+
+    // ── I/O ──
+
     fn expand_print(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
-        let mut instructions = Vec::new();
-
         if let Some(Expr::StringLit(s)) = args.first() {
-            let label = format!("__str_{}", self.print_counter);
-            self.print_counter += 1;
-
-            self.pending_data.push(DataItem::new(
-                label.clone(),
-                DataDef::String(s.clone()),
-            ));
-
+            let label = self.next_label("str_");
+            self.pending_data.push(DataItem::new(label.clone(), DataDef::String(s.clone())));
             if self.format.contains("win") {
-                // Win64: sub rsp,40 → lea rcx,label → call printf → add rsp,40
-                instructions.push(Instruction::two(Opcode::Sub, Operand::Reg(Register::Rsp), Operand::Imm(40)));
-                instructions.push(Instruction::two(Opcode::Lea, Operand::Reg(Register::Rcx), Operand::Label(label)));
-                instructions.push(Instruction::one(Opcode::Call, Operand::Label("printf".to_string())));
-                instructions.push(Instruction::two(Opcode::Add, Operand::Reg(Register::Rsp), Operand::Imm(40)));
+                Ok(self.win64_call("printf", &[Operand::Label(label)]))
             } else {
-                // Linux: write(1, label, len)
                 let len = s.len() as i64;
-                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rax), Operand::Imm(1)));
-                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdi), Operand::Imm(1)));
-                instructions.push(Instruction::two(Opcode::Lea, Operand::Reg(Register::Rsi), Operand::Label(label)));
-                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdx), Operand::Imm(len)));
-                instructions.push(Instruction::zero(Opcode::Syscall));
+                Ok(vec![
+                    Instruction::two(Opcode::Mov, Operand::Reg(Register::Rax), Operand::Imm(1)),
+                    Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdi), Operand::Imm(1)),
+                    Instruction::two(Opcode::Lea, Operand::Reg(Register::Rsi), Operand::Label(label)),
+                    Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdx), Operand::Imm(len)),
+                    Instruction::zero(Opcode::Syscall),
+                ])
             }
         } else if let Some(expr) = args.first() {
             let op = self.expr_to_operand(expr);
             if self.format.contains("win") {
-                instructions.push(Instruction::two(Opcode::Sub, Operand::Reg(Register::Rsp), Operand::Imm(40)));
-                instructions.push(Instruction::two(Opcode::Lea, Operand::Reg(Register::Rcx), op));
-                instructions.push(Instruction::one(Opcode::Call, Operand::Label("printf".to_string())));
-                instructions.push(Instruction::two(Opcode::Add, Operand::Reg(Register::Rsp), Operand::Imm(40)));
+                Ok(self.win64_call("printf", &[op]))
             } else {
-                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rax), Operand::Imm(1)));
-                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdi), Operand::Imm(1)));
-                instructions.push(Instruction::two(Opcode::Lea, Operand::Reg(Register::Rsi), op));
-                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdx), Operand::Imm(256)));
-                instructions.push(Instruction::zero(Opcode::Syscall));
+                Ok(vec![
+                    Instruction::two(Opcode::Mov, Operand::Reg(Register::Rax), Operand::Imm(1)),
+                    Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdi), Operand::Imm(1)),
+                    Instruction::two(Opcode::Lea, Operand::Reg(Register::Rsi), op),
+                    Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdx), Operand::Imm(256)),
+                    Instruction::zero(Opcode::Syscall),
+                ])
             }
+        } else {
+            Ok(vec![])
         }
-
-        Ok(instructions)
     }
 
     fn expand_exit(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
-        let code = match args.first() {
-            Some(Expr::Immediate(v)) => *v,
-            _ => 0,
-        };
-
-        let mut instructions = Vec::new();
+        let code = match args.first() { Some(Expr::Immediate(v)) => *v, _ => 0 };
         if self.format.contains("win") {
+            let mut v = Vec::new();
             if code == 0 {
-                instructions.push(Instruction::two(Opcode::Xor, Operand::Reg(Register::Ecx), Operand::Reg(Register::Ecx)));
+                v.push(Instruction::two(Opcode::Xor, Operand::Reg(Register::Ecx), Operand::Reg(Register::Ecx)));
             } else {
-                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Ecx), Operand::Imm(code)));
+                v.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Ecx), Operand::Imm(code)));
             }
-            instructions.push(Instruction::one(Opcode::Call, Operand::Label("ExitProcess".to_string())));
+            v.push(Instruction::one(Opcode::Call, Operand::Label("ExitProcess".to_string())));
+            Ok(v)
         } else {
-            instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rax), Operand::Imm(60)));
-            instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdi), Operand::Imm(code)));
-            instructions.push(Instruction::zero(Opcode::Syscall));
+            Ok(vec![
+                Instruction::two(Opcode::Mov, Operand::Reg(Register::Rax), Operand::Imm(60)),
+                Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdi), Operand::Imm(code)),
+                Instruction::zero(Opcode::Syscall),
+            ])
         }
+    }
 
-        Ok(instructions)
+    fn expand_printf(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        // printf(fmt_string_or_label, arg1, arg2, ...)
+        let ops: Vec<Operand> = args.iter().map(|a| {
+            if let Expr::StringLit(s) = a {
+                let label = self.next_label("fmt_");
+                self.pending_data.push(DataItem::new(label.clone(), DataDef::String(s.clone())));
+                Operand::Label(label)
+            } else {
+                self.expr_to_operand(a)
+            }
+        }).collect();
+        if self.format.contains("win") {
+            Ok(self.win64_call("printf", &ops))
+        } else {
+            // Linux: just call printf (linked with libc)
+            Ok(self.win64_call("printf", &ops)) // same ABI for simplicity
+        }
+    }
+
+    fn expand_input(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        // input(buffer, max_size) → ReadConsoleA or scanf
+        let fmt_label = self.next_label("fmt_");
+        self.pending_data.push(DataItem::new(fmt_label.clone(), DataDef::String("%s".to_string())));
+        let buf_op = args.first().map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        if self.format.contains("win") {
+            Ok(self.win64_call("scanf", &[Operand::Label(fmt_label), buf_op]))
+        } else {
+            Ok(self.win64_call("scanf", &[Operand::Label(fmt_label), buf_op]))
+        }
+    }
+
+    // ── Memory ──
+
+    fn expand_alloc(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        // alloc(size) → GetProcessHeap + HeapAlloc, result in rax
+        let size = args.first().map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        Ok(vec![
+            Instruction::two(Opcode::Sub, Operand::Reg(Register::Rsp), Operand::Imm(40)),
+            Instruction::one(Opcode::Call, Operand::Label("GetProcessHeap".to_string())),
+            Instruction::two(Opcode::Mov, Operand::Reg(Register::Rcx), Operand::Reg(Register::Rax)),
+            Instruction::two(Opcode::Xor, Operand::Reg(Register::Edx), Operand::Reg(Register::Edx)),
+            Instruction::two(Opcode::Mov, Operand::Reg(Register::R8), size),
+            Instruction::one(Opcode::Call, Operand::Label("HeapAlloc".to_string())),
+            Instruction::two(Opcode::Add, Operand::Reg(Register::Rsp), Operand::Imm(40)),
+        ])
+    }
+
+    fn expand_free(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        // free(ptr_reg) → GetProcessHeap + HeapFree
+        let ptr = args.first().map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        Ok(vec![
+            Instruction::two(Opcode::Sub, Operand::Reg(Register::Rsp), Operand::Imm(40)),
+            Instruction::one(Opcode::Push, ptr),
+            Instruction::one(Opcode::Call, Operand::Label("GetProcessHeap".to_string())),
+            Instruction::two(Opcode::Mov, Operand::Reg(Register::Rcx), Operand::Reg(Register::Rax)),
+            Instruction::two(Opcode::Xor, Operand::Reg(Register::Edx), Operand::Reg(Register::Edx)),
+            Instruction::one(Opcode::Pop, Operand::Reg(Register::R8)),
+            Instruction::one(Opcode::Call, Operand::Label("HeapFree".to_string())),
+            Instruction::two(Opcode::Add, Operand::Reg(Register::Rsp), Operand::Imm(40)),
+        ])
+    }
+
+    fn expand_memcpy(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        // memcpy(dst, src, n) → inline rep movsb
+        let dst = args.first().map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        let src = args.get(1).map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        let n   = args.get(2).map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        Ok(vec![
+            Instruction::two(Opcode::Lea, Operand::Reg(Register::Rdi), dst),
+            Instruction::two(Opcode::Lea, Operand::Reg(Register::Rsi), src),
+            Instruction::two(Opcode::Mov, Operand::Reg(Register::Rcx), n),
+            Instruction::zero(Opcode::RepMovsb),
+        ])
+    }
+
+    fn expand_memset(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        // memset(ptr, val, n) → inline rep stosb
+        let ptr = args.first().map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        let val = args.get(1).map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        let n   = args.get(2).map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        Ok(vec![
+            Instruction::two(Opcode::Lea, Operand::Reg(Register::Rdi), ptr),
+            Instruction::two(Opcode::Mov, Operand::Reg(Register::Al), val),
+            Instruction::two(Opcode::Mov, Operand::Reg(Register::Rcx), n),
+            Instruction::zero(Opcode::RepStosb),
+        ])
+    }
+
+    // ── CRT wrappers (1/2/3-arg C functions via Win64 ABI) ──
+
+    fn expand_crt1(&mut self, func: &str, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        let a1 = args.first().map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        Ok(self.win64_call(func, &[a1]))
+    }
+
+    fn expand_crt2(&mut self, func: &str, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        let a1 = args.first().map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        let a2 = args.get(1).map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        Ok(self.win64_call(func, &[a1, a2]))
+    }
+
+    fn expand_crt3(&mut self, func: &str, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        let a1 = args.first().map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        let a2 = args.get(1).map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        let a3 = args.get(2).map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        Ok(self.win64_call(func, &[a1, a2, a3]))
+    }
+
+    // ── Math ──
+
+    fn expand_abs(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        // abs(reg) → neg + cmovl (in-place absolute value)
+        let op = args.first().map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Reg(Register::Rax));
+        if let Operand::Reg(ref reg) = op {
+            let r = reg.clone();
+            Ok(vec![
+                Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdx), Operand::Reg(r.clone())),
+                Instruction::one(Opcode::Neg, Operand::Reg(Register::Rdx)),
+                Instruction::two(Opcode::Cmovl, Operand::Reg(r), Operand::Reg(Register::Rdx)),
+            ])
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    fn expand_minmax(&mut self, args: &[Expr], is_min: bool) -> Result<Vec<Instruction>, String> {
+        // min(a, b) / max(a, b) → cmp + cmov, result in first reg
+        let a = args.first().map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Reg(Register::Rax));
+        let b = args.get(1).map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(0));
+        if let Operand::Reg(ref reg) = a {
+            let cmov = if is_min { Opcode::Cmovg } else { Opcode::Cmovl };
+            Ok(vec![
+                Instruction::two(Opcode::Cmp, a.clone(), b.clone()),
+                Instruction::two(cmov, Operand::Reg(reg.clone()), b),
+            ])
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    fn expand_sqrt(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        // sqrt(xmm_dst, xmm_src) → sqrtss
+        let dst = args.first().map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Reg(Register::Xmm(0)));
+        let src = args.get(1).map(|a| self.expr_to_operand(a)).unwrap_or(dst.clone());
+        Ok(vec![Instruction::two(Opcode::Sqrtss, dst, src)])
+    }
+
+    // ── SIMD/AVX ──
+
+    fn expand_simd(&mut self, op: Opcode, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        // vec_add(dst, src) or vec_add(dst, src1, src2)
+        let ops: Vec<Operand> = args.iter().map(|a| self.expr_to_operand(a)).collect();
+        if ops.len() >= 3 {
+            Ok(vec![Instruction::new(op, ops)])
+        } else if ops.len() == 2 {
+            Ok(vec![Instruction::new(op, vec![ops[0].clone(), ops[0].clone(), ops[1].clone()])])
+        } else {
+            Ok(vec![])
+        }
     }
 
     fn expect_lparen(&mut self) -> Result<(), String> {
         match self.advance() {
             Token::LParen => Ok(()),
             other => Err(format!("expected '(', got {:?}", other)),
+        }
+    }
+
+    fn expect_operator(&mut self) -> Result<String, String> {
+        match self.advance() {
+            Token::EqEq => Ok("==".to_string()),
+            Token::BangEq => Ok("!=".to_string()),
+            Token::Lt => Ok("<".to_string()),
+            Token::LtEq => Ok("<=".to_string()),
+            Token::Gt => Ok(">".to_string()),
+            Token::GtEq => Ok(">=".to_string()),
+            Token::StringLiteral(s) => Ok(s),
+            Token::Ident(s) => Ok(s),
+            other => Err(format!("expected operator, got {:?}", other)),
+        }
+    }
+
+    fn expect_comma(&mut self) -> Result<(), String> {
+        match self.advance() {
+            Token::Comma => Ok(()),
+            other => Err(format!("expected ',', got {:?}", other)),
         }
     }
 
