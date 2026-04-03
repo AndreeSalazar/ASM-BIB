@@ -235,17 +235,27 @@ impl CoffObject {
     pub fn encode_program(mut self, program: &Program) -> Result<Vec<u8>, String> {
         let encoder = X86_64Encoder; // Fixed to x64 for now
         
-        // 1. Generate MSVC Autolink .drectve Section if requested
-        if !program.includelibs.is_empty() {
-            let mut drectve_data = String::new();
-            for lib in &program.includelibs {
-                drectve_data.push_str(&format!("/DEFAULTLIB:\"{}\" ", lib));
+        // 1. Generate MSVC Autolink .drectve Section (Phase 3 DLL Support)
+        let mut drectve_data = String::new();
+        for lib in &program.includelibs {
+            drectve_data.push_str(&format!("/DEFAULTLIB:\"{}\" ", lib));
+        }
+        
+        for section in &program.sections {
+            for func in &section.functions {
+                if func.exported {
+                    drectve_data.push_str(&format!("/EXPORT:{} ", func.name));
+                }
             }
+        }
+        
+        if !drectve_data.is_empty() {
             drectve_data.push('\0');
-            
             // Characteristics: LNK_INFO (0x200), ALIGN_1BYTES (0x100000), LNK_REMOVE (0x800)
             self.add_section(".drectve", 0x00100A00, drectve_data.into_bytes());
         }
+        
+        let mut pdata_entries = Vec::new();
         
         for section in &program.sections {
             let (characteristics, sec_name) = match &section.kind {
@@ -267,7 +277,7 @@ impl CoffObject {
             // Encode Functions (for .text)
             for func in &section.functions {
                 // Register symbol for the function
-                self.add_symbol(&func.name, current_offset as u32, self.sections.len() as i16 + 1, 2); // Class 2 = External
+                let func_sym_idx = self.add_symbol(&func.name, current_offset as u32, self.sections.len() as i16 + 1, 2); // Class 2 = External
                 
                 let mut local_labels = std::collections::HashMap::new();
                 
@@ -291,6 +301,8 @@ impl CoffObject {
                     }
                 }
                 
+                let func_start_offset = raw_data.len();
+                
                 // Pass 2: Encode and resolve
                 for item in &func.instructions {
                     if let crate::ir::FunctionItem::Instruction(inst) = item {
@@ -311,11 +323,23 @@ impl CoffObject {
                         }
                     }
                 }
+                
+                let func_end_offset = raw_data.len();
+                pdata_entries.push((func_sym_idx, (func_end_offset - func_start_offset) as u32));
+                
                 current_offset = raw_data.len();
             }
 
             // Encode Data Items (for .data, .bss, .rdata)
             for item in &section.data {
+                // ALIGNMENT PADDING ENGINE (Task 3)
+                if let Some(align) = item.alignment {
+                    if align > 0 && raw_data.len() % align != 0 {
+                        let padding = align - (raw_data.len() % align);
+                        raw_data.resize(raw_data.len() + padding, 0);
+                    }
+                }
+                
                 // Register symbol for the variable/data item
                 self.add_symbol(&item.name, raw_data.len() as u32, self.sections.len() as i16 + 1, 3); // Class 3 = Static
                 
@@ -359,6 +383,39 @@ impl CoffObject {
 
             let sec_idx = self.add_section(sec_name, characteristics, raw_data);
             self.relocations[sec_idx - 1] = sec_relocs;
+        }
+
+        // 2. Generate .pdata and .xdata Windows SEH (Exception Handling) Engine (Task 1)
+        if !pdata_entries.is_empty() {
+            // Generate minimal .xdata section (1 UNWIND_INFO block used by all functions)
+            let xdata = vec![0x01, 0x00, 0x00, 0x00]; 
+            let xdata_characteristics = 0x40300040; // INITIALIZED_DATA | MEM_READ | ALIGN_4BYTES
+            let xdata_sym_idx = self.add_symbol(".xdata", 0, self.sections.len() as i16 + 1, 3);
+            self.add_section(".xdata", xdata_characteristics, xdata);
+            
+            // Generate .pdata section (Array of IMAGE_RUNTIME_FUNCTION_ENTRY)
+            let mut pdata = Vec::new();
+            let mut pdata_relocs = Vec::new();
+            let pdata_characteristics = 0x40300040; // INITIALIZED_DATA | MEM_READ | ALIGN_4BYTES
+            
+            for (sym_idx, func_size) in pdata_entries {
+                let offset = pdata.len() as u32;
+                
+                // BeginAddress
+                pdata.extend_from_slice(&[0,0,0,0]);
+                pdata_relocs.push((offset, sym_idx, 3)); // 3 = IMAGE_REL_AMD64_ADDR32NB
+                
+                // EndAddress
+                pdata.extend_from_slice(&(func_size as u32).to_le_bytes());
+                pdata_relocs.push((offset + 4, sym_idx, 3));
+                
+                // UnwindInfoAddress
+                pdata.extend_from_slice(&[0,0,0,0]);
+                pdata_relocs.push((offset + 8, xdata_sym_idx, 3));
+            }
+            
+            let pdata_sec_idx = self.add_section(".pdata", pdata_characteristics, pdata);
+            self.relocations[pdata_sec_idx - 1] = pdata_relocs;
         }
 
         Ok(self.build())

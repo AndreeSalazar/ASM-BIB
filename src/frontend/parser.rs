@@ -1126,9 +1126,75 @@ impl Parser {
             "vec_div" | "vec8_div" => Some(self.expand_simd(Opcode::Vdivps, args)?),
             "prologue" => Some(self.expand_prologue(args)?),
             "epilogue" => Some(self.expand_epilogue()?),
+            "invoke" => Some(self.expand_invoke(args)?),
             _ => None,
         };
         Ok(insts.map(|v| v.into_iter().map(FunctionItem::Instruction).collect()))
+    }
+    
+    fn expand_invoke(&self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        if args.is_empty() {
+            return Err("invoke requires at least a target function".to_string());
+        }
+        
+        let target_op = self.expr_to_operand(&args[0]);
+        let mut v = Vec::new();
+        
+        let invoke_args = &args[1..];
+        let arg_count = invoke_args.len();
+        
+        // C-Call ABI (Win64): 32 bytes shadow space + space for args > 4
+        // Stack must be 16-byte aligned before the 'call' instruction.
+        // Assuming we are 16-byte aligned here, we need to subtract an amount that parity-adjusts to 8 (so call makes it 0 again).
+        // Let's allocate shadow space + extra args.
+        let mut stack_alloc = 32;
+        if arg_count > 4 {
+            stack_alloc += (arg_count - 4) * 8;
+        }
+        // Ensuring the allocation maintains the 16-byte alignment rule (caller aligns to 8 for the return address push):
+        // Wait, standard prologue does sub rsp, 0x28 (40 bytes = 32 + 8). That keeps it aligned.
+        if stack_alloc % 16 == 0 {
+            stack_alloc += 8;
+        }
+        
+        v.push(Instruction::two(Opcode::Sub, Operand::Reg(Register::Rsp), Operand::Imm(stack_alloc as i64)));
+        
+        // Move extra arguments to stack > 4
+        for (i, arg) in invoke_args.iter().enumerate().skip(4) {
+            let offset = 32 + (i - 4) * 8;
+            let arg_op = self.expr_to_operand(arg);
+            let mem_op = Operand::Memory { base: Some(Register::Rsp), index: None, scale: 1, disp: offset as i32 };
+            
+            match arg_op {
+               Operand::Label(_) => {
+                   v.push(Instruction::two(Opcode::Lea, Operand::Reg(Register::Rax), arg_op));
+                   v.push(Instruction::two(Opcode::Mov, mem_op, Operand::Reg(Register::Rax)));
+               }
+               Operand::Memory { .. } => {
+                   v.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rax), arg_op));
+                   v.push(Instruction::two(Opcode::Mov, mem_op, Operand::Reg(Register::Rax)));
+               }
+               _ => v.push(Instruction::two(Opcode::Mov, mem_op, arg_op)),
+            }
+        }
+        
+        // Re-load first 4 arguments into RCX, RDX, R8, R9
+        let regs = [Register::Rcx, Register::Rdx, Register::R8, Register::R9];
+        for (i, arg) in invoke_args.iter().enumerate().take(4) {
+            let arg_op = self.expr_to_operand(arg);
+            match arg_op {
+                Operand::Label(_) => v.push(Instruction::two(Opcode::Lea, Operand::Reg(regs[i].clone()), arg_op)),
+                _ => v.push(Instruction::two(Opcode::Mov, Operand::Reg(regs[i].clone()), arg_op)),
+            }
+        }
+        
+        // Perform call
+        v.push(Instruction::one(Opcode::Call, target_op));
+        
+        // Restore stack
+        v.push(Instruction::two(Opcode::Add, Operand::Reg(Register::Rsp), Operand::Imm(stack_alloc as i64)));
+        
+        Ok(v)
     }
 
     // ── I/O ──

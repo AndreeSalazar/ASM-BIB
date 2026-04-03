@@ -36,6 +36,7 @@ fn main() {
     let mut output_file: Option<String> = None;
     let mut step_mode = false;
     let mut build_exe = false;
+    let mut build_dll = false;
     let mut build_obj = false;
     let mut internal_native = false;
 
@@ -47,6 +48,7 @@ fn main() {
             "--native" => internal_native = true,
             "--step" => step_mode = true,
             "--build" | "--exe" => build_exe = true,
+            "--dll" => { build_exe = true; build_dll = true; }
             "--obj" => build_obj = true,
             "-o" => {
                 i += 1;
@@ -428,18 +430,18 @@ fn main() {
 
             match linker {
                 Some(ref link_path) => {
-                    eprintln!("│  [2/2] link /SUBSYSTEM:CONSOLE /ENTRY:main → {}", exe_path);
-
+                    let exe_disp = if build_dll { format!("{}.dll", base_name) } else { exe_path.clone() };
+                    eprintln!("│  [2/2] link /{} /ENTRY:{} → {}", if build_dll { "DLL" } else { "SUBSYSTEM:CONSOLE" }, if build_dll { "_DllMainCRTStartup" } else { "main" }, exe_disp);
                     let lib_paths = find_lib_paths();
                     let mut link_args: Vec<String> = vec![
-                        "/SUBSYSTEM:CONSOLE".to_string(),
-                        "/ENTRY:main".to_string(),
+                        if build_dll { "/DLL".to_string() } else { "/SUBSYSTEM:CONSOLE".to_string() },
+                        if build_dll { "/ENTRY:_DllMainCRTStartup".to_string() } else { "/ENTRY:main".to_string() },
                         obj_path.clone(),
                         "kernel32.lib".to_string(),
                         "msvcrt.lib".to_string(),
                         "ucrt.lib".to_string(),
                         "legacy_stdio_definitions.lib".to_string(),
-                        format!("/OUT:{}", exe_path),
+                        format!("/OUT:{}", if build_dll { format!("{}.dll", base_name) } else { exe_path.clone() }),
                         "/NOLOGO".to_string(),
                     ];
                     for lp in &lib_paths {
