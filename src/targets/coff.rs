@@ -250,11 +250,35 @@ impl CoffObject {
             let mut raw_data = Vec::new();
             let mut sec_relocs = Vec::new(); // Collect relocations for this section
             
+            let mut current_offset = raw_data.len();
+            
             // Encode Functions (for .text)
             for func in &section.functions {
                 // Register symbol for the function
-                self.add_symbol(&func.name, raw_data.len() as u32, self.sections.len() as i16 + 1, 2); // Class 2 = External
+                self.add_symbol(&func.name, current_offset as u32, self.sections.len() as i16 + 1, 2); // Class 2 = External
                 
+                // Pass 1: Estimate offsets and Register Labels
+                // For a true 100% two-pass assembler we'd need exact byte sizes,
+                // but since all our JMPs/JEs use rel32, they are always length 6 (0F 8X 00 00 00 00) or length 5 (E9 00 00 00 00).
+                let mut temp_offset = current_offset;
+                for item in &func.instructions {
+                    match item {
+                        crate::ir::FunctionItem::Instruction(inst) => {
+                            // Rough estimation by encoding it (fast enough for now)
+                            if let Ok(encoded) = encoder.encode(inst) {
+                                temp_offset += encoded.bytes.len();
+                            } else {
+                                temp_offset += 1; // NOP
+                            }
+                        }
+                        crate::ir::FunctionItem::Label(lbl) => {
+                            self.add_symbol(lbl, temp_offset as u32, self.sections.len() as i16 + 1, 3);
+                        }
+                        _ => {}
+                    }
+                }
+                
+                // Pass 2: Encode and resolve
                 for item in &func.instructions {
                     if let crate::ir::FunctionItem::Instruction(inst) = item {
                         match encoder.encode(inst) {
@@ -274,6 +298,7 @@ impl CoffObject {
                         }
                     }
                 }
+                current_offset = raw_data.len();
             }
 
             // Encode Data Items (for .data, .bss, .rdata)
