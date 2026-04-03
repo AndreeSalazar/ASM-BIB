@@ -1163,7 +1163,7 @@ impl Parser {
         for (i, arg) in invoke_args.iter().enumerate().skip(4) {
             let offset = 32 + (i - 4) * 8;
             let arg_op = self.expr_to_operand(arg);
-            let mem_op = Operand::Memory { base: Some(Register::Rsp), index: None, scale: 1, disp: offset as i32 };
+            let mem_op = Operand::Memory { base: Some(Register::Rsp), index: None, scale: 1, disp: offset as i64 };
             
             match arg_op {
                Operand::Label(_) => {
