@@ -25,6 +25,7 @@ fn main() {
         eprintln!("  --nasm     Export NASM Intel syntax (.asm)");
         eprintln!("  --masm     Export MASM Microsoft syntax (.asm)");
         eprintln!("  --step     Show pipeline steps (debug mode)");
+        eprintln!("  --build    Assemble + link → .exe (requires ml64/nasm + link.exe)");
         eprintln!("  -o FILE    Output file (default: stdout)");
         process::exit(1);
     }
@@ -33,6 +34,7 @@ fn main() {
     let mut output_format = OutputFormat::Nasm; // default
     let mut output_file: Option<String> = None;
     let mut step_mode = false;
+    let mut build_mode = false;
 
     let mut i = 2;
     while i < args.len() {
@@ -40,6 +42,7 @@ fn main() {
             "--nasm" => output_format = OutputFormat::Nasm,
             "--masm" => output_format = OutputFormat::Masm,
             "--step" => step_mode = true,
+            "--build" => build_mode = true,
             "-o" => {
                 i += 1;
                 if i < args.len() {
@@ -97,7 +100,8 @@ fn main() {
             Token::Extern | Token::Pub | Token::Inline | Token::Volatile |
             Token::Unsafe | Token::Naked | Token::Asm |
             Token::If | Token::Else | Token::While | Token::For |
-            Token::Loop | Token::Break | Token::Continue | Token::Return
+            Token::Loop | Token::Break | Token::Continue | Token::Return |
+            Token::Class
         )).count();
         let decorators = tokens.iter().filter(|t| matches!(t, Token::At)).count();
         let comments = tokens.iter().filter(|t| matches!(t, Token::Comment(_))).count();
@@ -222,6 +226,232 @@ fn main() {
                 eprintln!("└─ DONE ({:?}) total: {}µs ─────────────────────────────────",
                     output_format, total_us);
             }
+        }
+    }
+
+    // ── Build: assemble + link → .exe ───────────────────────────────────
+    // Auto-detect VS Build Tools paths on Windows
+    fn find_vs_tool(name: &str) -> Option<std::path::PathBuf> {
+        // Check PATH first
+        if let Ok(output) = std::process::Command::new("where").arg(name).output() {
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout);
+                if let Some(line) = s.lines().next() {
+                    let p = std::path::PathBuf::from(line.trim());
+                    if p.exists() { return Some(p); }
+                }
+            }
+        }
+        // Search VS Build Tools directories
+        let roots = [
+            r"C:\Program Files (x86)\Microsoft Visual Studio",
+            r"C:\Program Files\Microsoft Visual Studio",
+        ];
+        for root in &roots {
+            let root_path = std::path::Path::new(root);
+            if !root_path.exists() { continue; }
+            if let Ok(entries) = std::fs::read_dir(root_path) {
+                for year in entries.flatten() {
+                    let host_dir = year.path().join("BuildTools").join("VC").join("Tools").join("MSVC");
+                    if let Ok(versions) = std::fs::read_dir(&host_dir) {
+                        for ver in versions.flatten() {
+                            let tool = ver.path().join("bin").join("Hostx64").join("x64").join(name);
+                            if tool.exists() { return Some(tool); }
+                        }
+                    }
+                    // Also check Community/Professional/Enterprise
+                    for edition in &["Community", "Professional", "Enterprise"] {
+                        let host_dir = year.path().join(edition).join("VC").join("Tools").join("MSVC");
+                        if let Ok(versions) = std::fs::read_dir(&host_dir) {
+                            for ver in versions.flatten() {
+                                let tool = ver.path().join("bin").join("Hostx64").join("x64").join(name);
+                                if tool.exists() { return Some(tool); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    if build_mode {
+        let asm_path = match output_file {
+            Some(ref p) => p.clone(),
+            None => {
+                // Auto-generate output filename
+                let base = input_file.trim_end_matches(".pasm");
+                let path = format!("{}.asm", base);
+                fs::write(&path, &output).unwrap_or_else(|e| {
+                    eprintln!("error: cannot write '{}': {}", path, e);
+                    process::exit(1);
+                });
+                path
+            }
+        };
+
+        let base_name = asm_path.trim_end_matches(".asm");
+        let obj_path = format!("{}.obj", base_name);
+        let exe_path = format!("{}.exe", base_name);
+
+        eprintln!("┌─ BUILD ────────────────────────────────────────────────────");
+
+        // Step 1: Assemble
+        let assemble_ok = match output_format {
+            OutputFormat::Masm => {
+                let ml64 = find_vs_tool("ml64.exe");
+                match ml64 {
+                    Some(ref ml64_path) => {
+                        eprintln!("│  [1/2] {} /c /nologo {}", ml64_path.display(), asm_path);
+                        let result = std::process::Command::new(ml64_path)
+                            .args(&["/c", "/nologo", &format!("/Fo{}", obj_path), &asm_path])
+                            .output();
+                        match result {
+                            Ok(out) => {
+                                if !out.status.success() {
+                                    let err = String::from_utf8_lossy(&out.stderr);
+                                    let stdout = String::from_utf8_lossy(&out.stdout);
+                                    eprintln!("│  ❌ ml64 failed:");
+                                    for line in format!("{}{}", stdout, err).lines() {
+                                        if !line.trim().is_empty() {
+                                            eprintln!("│     {}", line);
+                                        }
+                                    }
+                                    false
+                                } else {
+                                    eprintln!("│  ✅ Assembled OK");
+                                    true
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("│  ❌ ml64 exec error: {}", e);
+                                false
+                            }
+                        }
+                    }
+                    None => {
+                        eprintln!("│  ❌ ml64.exe not found — install Visual Studio Build Tools");
+                        false
+                    }
+                }
+            }
+            OutputFormat::Nasm => {
+                eprintln!("│  [1/2] nasm -f win64 {} -o {}", asm_path, obj_path);
+                let result = std::process::Command::new("nasm")
+                    .args(&["-f", "win64", &asm_path, "-o", &obj_path])
+                    .output();
+                match result {
+                    Ok(out) => {
+                        if !out.status.success() {
+                            let err = String::from_utf8_lossy(&out.stderr);
+                            eprintln!("│  ❌ nasm failed: {}", err);
+                            false
+                        } else {
+                            eprintln!("│  ✅ Assembled OK");
+                            true
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("│  ❌ nasm not found — install NASM and add to PATH");
+                        false
+                    }
+                }
+            }
+        };
+
+        // Step 2: Link
+        if assemble_ok {
+            let linker = find_vs_tool("link.exe");
+
+            // Build LIB path for linker: MSVC libs + Windows SDK libs
+            fn find_lib_paths() -> Vec<String> {
+                let mut paths = Vec::new();
+                let vs_roots = [
+                    r"C:\Program Files (x86)\Microsoft Visual Studio",
+                    r"C:\Program Files\Microsoft Visual Studio",
+                ];
+                for root in &vs_roots {
+                    let root_path = std::path::Path::new(root);
+                    if !root_path.exists() { continue; }
+                    if let Ok(years) = std::fs::read_dir(root_path) {
+                        for year in years.flatten() {
+                            for edition in &["BuildTools", "Community", "Professional", "Enterprise"] {
+                                let msvc = year.path().join(edition).join("VC").join("Tools").join("MSVC");
+                                if let Ok(versions) = std::fs::read_dir(&msvc) {
+                                    for ver in versions.flatten() {
+                                        let lib = ver.path().join("lib").join("x64");
+                                        if lib.exists() { paths.push(lib.to_string_lossy().to_string()); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Windows SDK
+                let sdk = std::path::Path::new(r"C:\Program Files (x86)\Windows Kits\10\Lib");
+                if let Ok(versions) = std::fs::read_dir(sdk) {
+                    for ver in versions.flatten() {
+                        let um = ver.path().join("um").join("x64");
+                        if um.exists() { paths.push(um.to_string_lossy().to_string()); }
+                        let ucrt = ver.path().join("ucrt").join("x64");
+                        if ucrt.exists() { paths.push(ucrt.to_string_lossy().to_string()); }
+                    }
+                }
+                paths
+            }
+
+            match linker {
+                Some(ref link_path) => {
+                    eprintln!("│  [2/2] link /SUBSYSTEM:CONSOLE /ENTRY:main → {}", exe_path);
+
+                    let lib_paths = find_lib_paths();
+                    let mut link_args: Vec<String> = vec![
+                        "/SUBSYSTEM:CONSOLE".to_string(),
+                        "/ENTRY:main".to_string(),
+                        obj_path.clone(),
+                        "kernel32.lib".to_string(),
+                        "msvcrt.lib".to_string(),
+                        "ucrt.lib".to_string(),
+                        "legacy_stdio_definitions.lib".to_string(),
+                        format!("/OUT:{}", exe_path),
+                        "/NOLOGO".to_string(),
+                    ];
+                    for lp in &lib_paths {
+                        link_args.push(format!("/LIBPATH:{}", lp));
+                    }
+
+                    let result = std::process::Command::new(link_path)
+                        .args(&link_args)
+                        .output();
+
+                    match result {
+                        Ok(out) => {
+                            if !out.status.success() {
+                                let err = String::from_utf8_lossy(&out.stderr);
+                                let stdout = String::from_utf8_lossy(&out.stdout);
+                                eprintln!("│  ❌ link failed:");
+                                for line in format!("{}{}", stdout, err).lines() {
+                                    if !line.trim().is_empty() {
+                                        eprintln!("│     {}", line);
+                                    }
+                                }
+                            } else {
+                                eprintln!("│  ✅ Linked OK");
+                                eprintln!("└─ OUTPUT: {}", exe_path);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("│  ❌ link exec error: {}", e);
+                        }
+                    }
+                }
+                None => {
+                    eprintln!("│  ❌ link.exe not found — install Visual Studio Build Tools");
+                }
+            }
+
+            // Clean up .obj
+            let _ = fs::remove_file(&obj_path);
         }
     }
 }

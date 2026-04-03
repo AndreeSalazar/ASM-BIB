@@ -33,6 +33,7 @@ pub enum Token {
     Break,           // break
     Continue,        // continue
     Return,          // return
+    Class,           // class
 
     // Type keywords
     As,              // as
@@ -281,6 +282,7 @@ impl Lexer {
             "break"    => Some(Token::Break),
             "continue" => Some(Token::Continue),
             "return"   => Some(Token::Return),
+            "class"    => Some(Token::Class),
             "as"       => Some(Token::As),
             "sizeof"   => Some(Token::SizeOf),
             "alignof"  => Some(Token::AlignOf),

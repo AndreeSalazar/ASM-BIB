@@ -8,11 +8,14 @@ use crate::ir::{
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    print_counter: usize,
+    pending_data: Vec<DataItem>,
+    format: String,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self { tokens, pos: 0, print_counter: 0, pending_data: Vec::new(), format: "elf".to_string() }
     }
 
     fn peek(&self) -> &Token {
@@ -74,6 +77,7 @@ impl Parser {
                             self.expect_lparen()?;
                             format = self.expect_string_or_ident()?;
                             self.expect_rparen()?;
+                            self.format = format.clone();
                         }
                         "org" => {
                             self.expect_lparen()?;
@@ -174,6 +178,74 @@ impl Parser {
                         current_section = Some(sec);
                     }
                 }
+                Token::Class => {
+                    self.advance(); // class
+                    let class_name = self.expect_ident()?;
+                    if matches!(self.peek(), Token::Colon) {
+                        self.advance();
+                    }
+                    self.skip_newlines();
+
+                    // Parse class body: methods defined with def
+                    while matches!(self.peek(), Token::Indent(_)) {
+                        self.advance(); // indent
+
+                        match self.peek().clone() {
+                            Token::Def => {
+                                self.advance(); // def
+                                let method_name = self.expect_ident()?;
+                                // skip params
+                                if matches!(self.peek(), Token::LParen) {
+                                    self.advance();
+                                    let mut depth = 1;
+                                    while depth > 0 {
+                                        match self.advance() {
+                                            Token::LParen => depth += 1,
+                                            Token::RParen => depth -= 1,
+                                            Token::Eof => return Err("unexpected EOF in method params".into()),
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                if matches!(self.peek(), Token::Colon) {
+                                    self.advance();
+                                }
+
+                                let instructions = self.parse_function_body()?;
+                                let func_name = format!("{}_{}", class_name, method_name);
+
+                                let func = Function {
+                                    name: func_name,
+                                    exported: pending_export,
+                                    naked: false,
+                                    is_inline: false,
+                                    is_extern: false,
+                                    params: Vec::new(),
+                                    local_vars: Vec::new(),
+                                    instructions,
+                                };
+                                pending_export = false;
+
+                                if let Some(ref mut sec) = current_section {
+                                    sec.functions.push(func);
+                                } else {
+                                    let mut sec = Section {
+                                        kind: SectionKind::Text,
+                                        functions: Vec::new(),
+                                        data: Vec::new(),
+                                    };
+                                    sec.functions.push(func);
+                                    current_section = Some(sec);
+                                }
+                            }
+                            _ => { self.skip_to_newline(); }
+                        }
+
+                        if matches!(self.peek(), Token::Newline) {
+                            self.advance();
+                        }
+                    }
+                }
                 Token::Ident(_) => {
                     // Could be: name = data_type(value) OR instruction call at top level
                     let ident = if let Token::Ident(s) = self.advance() { s } else { unreachable!() };
@@ -207,6 +279,21 @@ impl Parser {
 
         if let Some(sec) = current_section {
             sections.push(sec);
+        }
+
+        // Inject auto-generated string data from print() expansions
+        if !self.pending_data.is_empty() {
+            let data_sec = sections.iter_mut().find(|s| s.kind == SectionKind::Data);
+            if let Some(sec) = data_sec {
+                sec.data.extend(self.pending_data.drain(..));
+            } else {
+                let sec = Section {
+                    kind: SectionKind::Data,
+                    functions: Vec::new(),
+                    data: self.pending_data.drain(..).collect(),
+                };
+                sections.insert(0, sec);
+            }
         }
 
         let mut program = Program::new(arch);
@@ -252,7 +339,19 @@ impl Parser {
                         name
                     };
 
-                    if matches!(self.peek(), Token::LParen) {
+                    if final_name == "print" && matches!(self.peek(), Token::LParen) {
+                        let args = self.parse_call_args()?;
+                        let expanded = self.expand_print(&args)?;
+                        for inst in expanded {
+                            items.push(FunctionItem::Instruction(inst));
+                        }
+                    } else if final_name == "exit" && matches!(self.peek(), Token::LParen) {
+                        let args = self.parse_call_args()?;
+                        let expanded = self.expand_exit(&args)?;
+                        for inst in expanded {
+                            items.push(FunctionItem::Instruction(inst));
+                        }
+                    } else if matches!(self.peek(), Token::LParen) {
                         let args = self.parse_call_args()?;
                         let inst = self.build_instruction(&final_name, &args)?;
                         items.push(FunctionItem::Instruction(inst));
@@ -521,6 +620,77 @@ impl Parser {
         };
 
         Ok(DataItem::new(name.to_string(), def))
+    }
+
+    // ── High-level builtins ────────────────────────────────────────────
+
+    fn expand_print(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        let mut instructions = Vec::new();
+
+        if let Some(Expr::StringLit(s)) = args.first() {
+            let label = format!("__str_{}", self.print_counter);
+            self.print_counter += 1;
+
+            self.pending_data.push(DataItem::new(
+                label.clone(),
+                DataDef::String(s.clone()),
+            ));
+
+            if self.format.contains("win") {
+                // Win64: sub rsp,40 → lea rcx,label → call printf → add rsp,40
+                instructions.push(Instruction::two(Opcode::Sub, Operand::Reg(Register::Rsp), Operand::Imm(40)));
+                instructions.push(Instruction::two(Opcode::Lea, Operand::Reg(Register::Rcx), Operand::Label(label)));
+                instructions.push(Instruction::one(Opcode::Call, Operand::Label("printf".to_string())));
+                instructions.push(Instruction::two(Opcode::Add, Operand::Reg(Register::Rsp), Operand::Imm(40)));
+            } else {
+                // Linux: write(1, label, len)
+                let len = s.len() as i64;
+                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rax), Operand::Imm(1)));
+                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdi), Operand::Imm(1)));
+                instructions.push(Instruction::two(Opcode::Lea, Operand::Reg(Register::Rsi), Operand::Label(label)));
+                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdx), Operand::Imm(len)));
+                instructions.push(Instruction::zero(Opcode::Syscall));
+            }
+        } else if let Some(expr) = args.first() {
+            let op = self.expr_to_operand(expr);
+            if self.format.contains("win") {
+                instructions.push(Instruction::two(Opcode::Sub, Operand::Reg(Register::Rsp), Operand::Imm(40)));
+                instructions.push(Instruction::two(Opcode::Lea, Operand::Reg(Register::Rcx), op));
+                instructions.push(Instruction::one(Opcode::Call, Operand::Label("printf".to_string())));
+                instructions.push(Instruction::two(Opcode::Add, Operand::Reg(Register::Rsp), Operand::Imm(40)));
+            } else {
+                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rax), Operand::Imm(1)));
+                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdi), Operand::Imm(1)));
+                instructions.push(Instruction::two(Opcode::Lea, Operand::Reg(Register::Rsi), op));
+                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdx), Operand::Imm(256)));
+                instructions.push(Instruction::zero(Opcode::Syscall));
+            }
+        }
+
+        Ok(instructions)
+    }
+
+    fn expand_exit(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
+        let code = match args.first() {
+            Some(Expr::Immediate(v)) => *v,
+            _ => 0,
+        };
+
+        let mut instructions = Vec::new();
+        if self.format.contains("win") {
+            if code == 0 {
+                instructions.push(Instruction::two(Opcode::Xor, Operand::Reg(Register::Ecx), Operand::Reg(Register::Ecx)));
+            } else {
+                instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Ecx), Operand::Imm(code)));
+            }
+            instructions.push(Instruction::one(Opcode::Call, Operand::Label("ExitProcess".to_string())));
+        } else {
+            instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rax), Operand::Imm(60)));
+            instructions.push(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rdi), Operand::Imm(code)));
+            instructions.push(Instruction::zero(Opcode::Syscall));
+        }
+
+        Ok(instructions)
     }
 
     fn expect_lparen(&mut self) -> Result<(), String> {
