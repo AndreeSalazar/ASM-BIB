@@ -48,6 +48,8 @@ def DoSqrt():
 
 @export
 def main():
+    @local(temp: DWORD)
+    @local(my_pts, Point3D)
     prologue(40)
     
     # 1. Print Menu
@@ -71,8 +73,8 @@ def main():
         @case(3)
             # Struct accessing via registers
             lea(rcx, pts)
-            movss(xmm0, dword(rcx))       # pts.x
-            addss(xmm0, dword(rcx + 4))   # pts.x + pts.y
+            movss(xmm0, dword([rcx]))       # pts.x
+            addss(xmm0, dword([rcx + 4]))   # pts.x + pts.y
             cvtss2si(rax, xmm0)
             printf(result_str, rax)
             @break

@@ -239,6 +239,9 @@ impl Emitter for NasmEmitter {
                         FunctionItem::RawDirective(line) => {
                             out.push_str(&format!("    {}\n", line));
                         }
+                        FunctionItem::LocalVar(_) => {
+                            // Ignored in NASM for now
+                        }
                         FunctionItem::Instruction(instr) => {
                             let mnemonic = instr.opcode.name();
                             if instr.operands.is_empty() {

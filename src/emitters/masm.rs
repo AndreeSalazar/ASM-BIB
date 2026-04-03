@@ -370,8 +370,7 @@ fn emit_function(out: &mut String, func: &Function, _program: &Program) {
     // LOCAL declarations
     if !func.local_vars.is_empty() {
         let locals: Vec<String> = func.local_vars.iter().map(|v| {
-            let type_name = size_to_masm_type(v.size);
-            format!("{}:{}", v.name, type_name)
+            format!("{}:{}", v.name, v.type_name)
         }).collect();
         out.push_str(&format!("    LOCAL {}\n", locals.join(", ")));
     }
@@ -387,6 +386,9 @@ fn emit_function(out: &mut String, func: &Function, _program: &Program) {
             }
             FunctionItem::RawDirective(line) => {
                 out.push_str(&format!("    {}\n", line));
+            }
+            FunctionItem::LocalVar(_) => {
+                // Handled before the loop
             }
             FunctionItem::Instruction(instr) => {
                 out.push_str(&format!("    {}\n", emit_instruction(instr)));
@@ -408,7 +410,24 @@ fn emit_instruction(instr: &Instruction) -> String {
     }
 
     // Determine if we need size qualifiers on memory operands
-    let inferred_size = infer_operand_size(&instr.operands);
+    let mut inferred_size = infer_operand_size(&instr.operands);
+
+    // Scalar SSE/SSE2 ops override XMM size to actual data width
+    match instr.opcode {
+        Opcode::Movss | Opcode::Addss | Opcode::Subss | Opcode::Mulss |
+        Opcode::Divss | Opcode::Sqrtss | Opcode::Minss | Opcode::Maxss |
+        Opcode::Cmpss | Opcode::Comiss | Opcode::Ucomiss |
+        Opcode::Cvtsi2ss | Opcode::Cvtss2si | Opcode::Cvttss2si => {
+            inferred_size = Some(Size::Dword);
+        }
+        Opcode::Movsd2 | Opcode::Addsd | Opcode::Subsd | Opcode::Mulsd |
+        Opcode::Divsd | Opcode::Sqrtsd | Opcode::Minsd | Opcode::Maxsd |
+        Opcode::Comisd | Opcode::Ucomisd |
+        Opcode::Cvtsi2sd | Opcode::Cvtsd2si | Opcode::Cvttsd2si => {
+            inferred_size = Some(Size::Qword);
+        }
+        _ => {}
+    }
 
     // Detect which operands are memory-context (Label used as data ref, not branch target)
     let is_branch = matches!(instr.opcode,
@@ -615,11 +634,11 @@ fn emit_data_item(out: &mut String, name: &str, def: &DataDef) {
             out.push_str(&format!("{} QWORD {} DUP(?)\n", name, n));
         }
         DataDef::Float32(vals) => {
-            let vs: Vec<String> = vals.iter().map(|v| format!("{}", v)).collect();
+            let vs: Vec<String> = vals.iter().map(|v| format!("{:?}", v)).collect();
             out.push_str(&format!("{} REAL4 {}\n", name, vs.join(", ")));
         }
         DataDef::Float64(vals) => {
-            let vs: Vec<String> = vals.iter().map(|v| format!("{}", v)).collect();
+            let vs: Vec<String> = vals.iter().map(|v| format!("{:?}", v)).collect();
             out.push_str(&format!("{} REAL8 {}\n", name, vs.join(", ")));
         }
         DataDef::Struct(struct_name, fields) => {
@@ -630,8 +649,8 @@ fn emit_data_item(out: &mut String, name: &str, def: &DataDef) {
                     DataDef::Word(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
                     DataDef::Dword(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
                     DataDef::Qword(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
-                    DataDef::Float32(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
-                    DataDef::Float64(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
+                    DataDef::Float32(v) => v.iter().map(|x| format!("{:?}", x)).collect::<Vec<_>>().join(", "),
+                    DataDef::Float64(v) => v.iter().map(|x| format!("{:?}", x)).collect::<Vec<_>>().join(", "),
                     DataDef::String(s) => format!("\"{}\"", s),
                     _ => "?".to_string(),
                 }

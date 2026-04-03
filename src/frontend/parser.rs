@@ -265,7 +265,17 @@ impl Parser {
                     pending_calling_conv = CallingConv::Default;
 
                     // Parse body (indented lines)
-                    let instructions = self.parse_function_body()?;
+                    let items = self.parse_function_body()?;
+                    
+                    let mut instructions = Vec::new();
+                    let mut local_vars = Vec::new();
+                    for item in items {
+                        if let FunctionItem::LocalVar(v) = item {
+                            local_vars.push(v);
+                        } else {
+                            instructions.push(item);
+                        }
+                    }
 
                     let func = Function {
                         name,
@@ -276,7 +286,7 @@ impl Parser {
                         calling_conv: cc,
                         alignment: align,
                         params: Vec::new(),
-                        local_vars: Vec::new(),
+                        local_vars,
                         instructions,
                     };
 
@@ -605,6 +615,21 @@ impl Parser {
                                 }
                             }
                         }
+                        "local" => {
+                            self.expect_lparen()?;
+                            let var_name = self.expect_string_or_ident()?;
+                            if matches!(self.peek(), Token::Colon) {
+                                self.advance();
+                            } else if matches!(self.peek(), Token::Comma) {
+                                self.advance();
+                            }
+                            let type_name = self.expect_string_or_ident()?;
+                            self.expect_rparen()?;
+                            items.push(FunctionItem::LocalVar(crate::ir::LocalVar {
+                                name: var_name,
+                                type_name,
+                            }));
+                        }
                         "default" => {
                             let mut prev_lbl = None;
                             if let Some((_, _, next_case)) = self.switch_stack.last_mut() {
@@ -701,6 +726,10 @@ impl Parser {
         match self.peek().clone() {
             Token::Ident(s) => {
                 self.advance();
+                if matches!(self.peek(), Token::LParen) {
+                    let args = self.parse_call_args()?;
+                    return Ok(Expr::Call { name: s, args });
+                }
                 // Check if it's a register
                 if Register::from_str(&s).is_some() {
                     Ok(Expr::Register(s))
@@ -714,7 +743,8 @@ impl Parser {
             }
             Token::FloatLiteral(v) => {
                 self.advance();
-                Ok(Expr::Label(format!("{}", v)))
+                // Use {:?} to ensure 1.0 emits as "1.0", not "1"
+                Ok(Expr::Label(format!("{:?}", v)))
             }
             Token::StringLiteral(s) => {
                 self.advance();
@@ -810,7 +840,31 @@ impl Parser {
             }
             Expr::Bool(true) => Operand::Imm(1),
             Expr::Bool(false) | Expr::Null => Operand::Imm(0),
-            Expr::Call { name, .. } => Operand::Label(name.clone()),
+            Expr::Call { name, args } => {
+                // Handle size-cast pseudo-calls: dword(x), word(x), byte(x), qword(x)
+                let lower = name.to_lowercase();
+                match lower.as_str() {
+                    "byte" | "word" | "dword" | "qword" => {
+                        if let Some(inner) = args.first() {
+                            let inner_op = self.expr_to_operand(inner);
+                            match inner_op {
+                                Operand::Label(label_name) => {
+                                    // e.g. dword(choice) → Label("[choice]") which emitter
+                                    // will prepend with DWORD PTR
+                                    Operand::Label(format!("[{}]", label_name))
+                                }
+                                Operand::Memory { base, index, scale, disp } => {
+                                    Operand::Memory { base, index, scale, disp }
+                                }
+                                _ => inner_op,
+                            }
+                        } else {
+                            Operand::Label(name.clone())
+                        }
+                    }
+                    _ => Operand::Label(name.clone()),
+                }
+            }
             Expr::NamespaceAccess { path } => Operand::Label(path.join("::")),
             Expr::FieldAccess { object, field } => {
                 if let Expr::Register(r) = object.as_ref() {
@@ -966,24 +1020,47 @@ impl Parser {
             }
             _ => {
                 // Check if it's a known struct
-                if self.pending_structs.iter().any(|s| s.name == type_name) {
+                let struct_def = self.pending_structs.iter().find(|s| s.name == type_name).cloned();
+                if let Some(sdef) = struct_def {
                     let mut args = Vec::new();
                     if matches!(self.peek(), Token::LParen) {
                         args = self.parse_call_args()?;
                     }
                     let fields: Vec<DataItem> = args.iter().enumerate().map(|(i, a)| {
-                        DataItem::new(format!("field{}", i), match a {
-                            Expr::Immediate(v) => DataDef::Dword(vec![*v as u32]),
-                            _ => {
-                                // Try string parsing to float
-                                let s = self.expr_display(a);
-                                if let Ok(f) = s.parse::<f32>() {
-                                    DataDef::Float32(vec![f])
-                                } else {
-                                    DataDef::String(s)
+                        // Check if there's a matching struct field definition to determine type
+                        let is_float_field = sdef.fields.get(i).map(|f| {
+                            matches!(f.type_name.as_str(), "REAL4" | "REAL8" | "real4" | "real8")
+                        }).unwrap_or(false);
+                        let is_f64 = sdef.fields.get(i).map(|f| {
+                            matches!(f.type_name.as_str(), "REAL8" | "real8")
+                        }).unwrap_or(false);
+
+                        let def = if is_float_field {
+                            // Float field — convert any numeric value to float
+                            let fval = match a {
+                                Expr::Immediate(v) => *v as f64,
+                                Expr::Label(s) => s.parse::<f64>().unwrap_or(0.0),
+                                _ => 0.0,
+                            };
+                            if is_f64 {
+                                DataDef::Float64(vec![fval])
+                            } else {
+                                DataDef::Float32(vec![fval as f32])
+                            }
+                        } else {
+                            match a {
+                                Expr::Immediate(v) => DataDef::Dword(vec![*v as u32]),
+                                _ => {
+                                    let s = self.expr_display(a);
+                                    if let Ok(f) = s.parse::<f32>() {
+                                        DataDef::Float32(vec![f])
+                                    } else {
+                                        DataDef::String(s)
+                                    }
                                 }
                             }
-                        })
+                        };
+                        DataItem::new(format!("field{}", i), def)
                     }).collect();
                     DataDef::Struct(type_name.to_string(), fields)
                 } else {
@@ -1036,7 +1113,10 @@ impl Parser {
             "abs"     => Some(self.expand_abs(args)?),
             "min"     => Some(self.expand_minmax(args, true)?),
             "max"     => Some(self.expand_minmax(args, false)?),
-            "pow"     => Some(self.expand_pow(args)?),
+            "pow"     => {
+                // pow needs labels injected, handle specially
+                return Ok(Some(self.expand_pow_items(args)?));
+            },
             "sqrt"    => Some(self.expand_sqrt(args)?),
             "dot4"    => Some(self.expand_dot4(args)?),
             "mat4x4_mul" => Some(self.expand_mat4x4(args)?),
@@ -1263,22 +1343,23 @@ impl Parser {
         Ok(vec![Instruction::two(Opcode::Sqrtss, dst, src)])
     }
 
-    fn expand_pow(&mut self, args: &[Expr]) -> Result<Vec<Instruction>, String> {
-        // pow(base_reg, exp) → loop-based multiplication, result in rax
+    fn expand_pow_items(&mut self, args: &[Expr]) -> Result<Vec<FunctionItem>, String> {
+        // pow(base, exp) → loop-based multiplication, result in rax
         let base = args.first().map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(2));
         let exp = args.get(1).map(|a| self.expr_to_operand(a)).unwrap_or(Operand::Imm(1));
         let loop_lbl = self.next_label("pow_");
         let done_lbl = self.next_label("powdone_");
         Ok(vec![
-            Instruction::two(Opcode::Mov, Operand::Reg(Register::Rbx), base),
-            Instruction::two(Opcode::Mov, Operand::Reg(Register::Rcx), exp),
-            Instruction::two(Opcode::Mov, Operand::Reg(Register::Rax), Operand::Imm(1)),
-            Instruction::two(Opcode::Test, Operand::Reg(Register::Rcx), Operand::Reg(Register::Rcx)),
-            Instruction::one(Opcode::Je, Operand::Label(done_lbl.clone())),
-            // loop:
-            Instruction::two(Opcode::Imul, Operand::Reg(Register::Rax), Operand::Reg(Register::Rbx)),
-            Instruction::one(Opcode::Dec, Operand::Reg(Register::Rcx)),
-            Instruction::one(Opcode::Jne, Operand::Label(loop_lbl.clone())),
+            FunctionItem::Instruction(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rbx), base)),
+            FunctionItem::Instruction(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rcx), exp)),
+            FunctionItem::Instruction(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rax), Operand::Imm(1))),
+            FunctionItem::Instruction(Instruction::two(Opcode::Test, Operand::Reg(Register::Rcx), Operand::Reg(Register::Rcx))),
+            FunctionItem::Instruction(Instruction::one(Opcode::Je, Operand::Label(done_lbl.clone()))),
+            FunctionItem::Label(loop_lbl.clone()),
+            FunctionItem::Instruction(Instruction::two(Opcode::Imul, Operand::Reg(Register::Rax), Operand::Reg(Register::Rbx))),
+            FunctionItem::Instruction(Instruction::one(Opcode::Dec, Operand::Reg(Register::Rcx))),
+            FunctionItem::Instruction(Instruction::one(Opcode::Jne, Operand::Label(loop_lbl))),
+            FunctionItem::Label(done_lbl),
         ])
     }
 

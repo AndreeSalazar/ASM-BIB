@@ -1,9 +1,11 @@
 pub mod x86_64;
+pub mod coff;
 
 use crate::ir::{Arch, Instruction};
 
 pub trait ArchEncoder {
     fn validate(&self, inst: &Instruction) -> Result<(), String>;
+    fn encode(&self, inst: &Instruction) -> Result<Vec<u8>, String>;
     fn arch(&self) -> Arch;
 }
 

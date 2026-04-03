@@ -140,9 +140,7 @@ pub struct FuncParam {
 #[derive(Debug, Clone)]
 pub struct LocalVar {
     pub name: String,
-    pub size: usize,
-    pub stack_offset: i64,
-    pub is_volatile: bool,
+    pub type_name: String,
 }
 
 /// Items inside a function
@@ -153,6 +151,8 @@ pub enum FunctionItem {
     Comment(String),
     /// Raw MASM directive line (e.g. ALIGN 16)
     RawDirective(String),
+    /// Local Variable declaration
+    LocalVar(LocalVar),
 }
 
 /// A section in the program

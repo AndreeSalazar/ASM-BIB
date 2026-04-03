@@ -25,7 +25,8 @@ fn main() {
         eprintln!("  --nasm     Export NASM Intel syntax (.asm)");
         eprintln!("  --masm     Export MASM Microsoft syntax (.asm)");
         eprintln!("  --step     Show pipeline steps (debug mode)");
-        eprintln!("  --build    Assemble + link → .exe (requires ml64/nasm + link.exe)");
+        eprintln!("  --build / --exe  Assemble + link → .exe (requires ml64/nasm + link.exe)");
+        eprintln!("  --obj      Assemble only → .obj (requires ml64/nasm)");
         eprintln!("  -o FILE    Output file (default: stdout)");
         process::exit(1);
     }
@@ -34,15 +35,19 @@ fn main() {
     let mut output_format = OutputFormat::Nasm; // default
     let mut output_file: Option<String> = None;
     let mut step_mode = false;
-    let mut build_mode = false;
+    let mut build_exe = false;
+    let mut build_obj = false;
+    let mut internal_native = false;
 
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
             "--nasm" => output_format = OutputFormat::Nasm,
             "--masm" => output_format = OutputFormat::Masm,
+            "--native" => internal_native = true,
             "--step" => step_mode = true,
-            "--build" => build_mode = true,
+            "--build" | "--exe" => build_exe = true,
+            "--obj" => build_obj = true,
             "-o" => {
                 i += 1;
                 if i < args.len() {
@@ -275,7 +280,7 @@ fn main() {
         None
     }
 
-    if build_mode {
+    if build_exe || build_obj {
         let asm_path = match output_file {
             Some(ref p) => p.clone(),
             None => {
@@ -297,44 +302,63 @@ fn main() {
         eprintln!("┌─ BUILD ────────────────────────────────────────────────────");
 
         // Step 1: Assemble
-        let assemble_ok = match output_format {
-            OutputFormat::Masm => {
-                let ml64 = find_vs_tool("ml64.exe");
-                match ml64 {
-                    Some(ref ml64_path) => {
-                        eprintln!("│  [1/2] {} /c /nologo {}", ml64_path.display(), asm_path);
-                        let result = std::process::Command::new(ml64_path)
-                            .args(&["/c", "/nologo", &format!("/Fo{}", obj_path), &asm_path])
-                            .output();
-                        match result {
-                            Ok(out) => {
-                                if !out.status.success() {
-                                    let err = String::from_utf8_lossy(&out.stderr);
-                                    let stdout = String::from_utf8_lossy(&out.stdout);
-                                    eprintln!("│  ❌ ml64 failed:");
-                                    for line in format!("{}{}", stdout, err).lines() {
-                                        if !line.trim().is_empty() {
-                                            eprintln!("│     {}", line);
-                                        }
-                                    }
-                                    false
-                                } else {
-                                    eprintln!("│  ✅ Assembled OK");
-                                    true
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("│  ❌ ml64 exec error: {}", e);
-                                false
-                            }
-                        }
-                    }
-                    None => {
-                        eprintln!("│  ❌ ml64.exe not found — install Visual Studio Build Tools");
+        let assemble_ok = if internal_native {
+            eprintln!("│  [1/2] (Internal Native) Generating {}", obj_path);
+            let mut coff = crate::targets::coff::CoffObject::new(true); // Always x64 for now
+            match coff.encode_program(&program) {
+                Ok(bytes) => {
+                    if let Err(e) = fs::write(&obj_path, bytes) {
+                        eprintln!("│  ❌ Failed to write obj: {}", e);
                         false
+                    } else {
+                        eprintln!("│  ✅ Assembled OK (Native COFF)");
+                        true
                     }
                 }
+                Err(e) => {
+                    eprintln!("│  ❌ Native encoding failed: {}", e);
+                    false
+                }
             }
+        } else {
+            match output_format {
+                OutputFormat::Masm => {
+                    let ml64 = find_vs_tool("ml64.exe");
+                    match ml64 {
+                        Some(ref ml64_path) => {
+                            eprintln!("│  [1/2] {} /c /nologo {}", ml64_path.display(), asm_path);
+                            let result = std::process::Command::new(ml64_path)
+                                .args(&["/c", "/nologo", &format!("/Fo{}", obj_path), &asm_path])
+                                .output();
+                            match result {
+                                Ok(out) => {
+                                    if !out.status.success() {
+                                        let err = String::from_utf8_lossy(&out.stderr);
+                                        let stdout = String::from_utf8_lossy(&out.stdout);
+                                        eprintln!("│  ❌ ml64 failed:");
+                                        for line in format!("{}{}", stdout, err).lines() {
+                                            if !line.trim().is_empty() {
+                                                eprintln!("│     {}", line);
+                                            }
+                                        }
+                                        false
+                                    } else {
+                                        eprintln!("│  ✅ Assembled OK");
+                                        true
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("│  ❌ ml64 exec error: {}", e);
+                                    false
+                                }
+                            }
+                        }
+                        None => {
+                            eprintln!("│  ❌ ml64.exe not found — install Visual Studio Build Tools");
+                            false
+                        }
+                    }
+                }
             OutputFormat::Nasm => {
                 eprintln!("│  [1/2] nasm -f win64 {} -o {}", asm_path, obj_path);
                 let result = std::process::Command::new("nasm")
@@ -351,16 +375,18 @@ fn main() {
                             true
                         }
                     }
-                    Err(_) => {
+                            Err(_) => {
                         eprintln!("│  ❌ nasm not found — install NASM and add to PATH");
                         false
                     }
                 }
             }
-        };
+        }
+    };
+
 
         // Step 2: Link
-        if assemble_ok {
+        if assemble_ok && build_exe {
             let linker = find_vs_tool("link.exe");
 
             // Build LIB path for linker: MSVC libs + Windows SDK libs
@@ -450,8 +476,10 @@ fn main() {
                 }
             }
 
-            // Clean up .obj
+            // Clean up .obj if we only wanted an exe
             let _ = fs::remove_file(&obj_path);
+        } else if assemble_ok && build_obj {
+            eprintln!("│  ✅ Output: {}", obj_path);
         }
     }
 }

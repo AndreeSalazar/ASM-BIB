@@ -1,5 +1,6 @@
 pub mod registers;
 pub mod instructions;
+pub mod encoder;
 
 use crate::ir::{Arch, Instruction};
 use crate::targets::ArchEncoder;
@@ -11,5 +12,10 @@ impl ArchEncoder for X86_64Encoder {
         // Base validation - accept all for now
         Ok(())
     }
+    
+    fn encode(&self, inst: &Instruction) -> Result<Vec<u8>, String> {
+        encoder::encode_instruction(inst)
+    }
+
     fn arch(&self) -> Arch { Arch::X86_64 }
 }
