@@ -4,9 +4,11 @@ pub mod coff;
 use crate::ir::{Arch, Instruction};
 use self::x86_64::encoder::EncodedInstruction;
 
+use std::collections::HashMap;
+
 pub trait ArchEncoder {
     fn validate(&self, inst: &Instruction) -> Result<(), String>;
-    fn encode(&self, inst: &Instruction) -> Result<EncodedInstruction, String>;
+    fn encode(&self, inst: &Instruction, labels: Option<&HashMap<String, u32>>, current_offset: u32) -> Result<EncodedInstruction, String>;
     fn arch(&self) -> Arch;
 }
 

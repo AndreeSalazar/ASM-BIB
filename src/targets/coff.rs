@@ -257,15 +257,15 @@ impl CoffObject {
                 // Register symbol for the function
                 self.add_symbol(&func.name, current_offset as u32, self.sections.len() as i16 + 1, 2); // Class 2 = External
                 
+                let mut local_labels = std::collections::HashMap::new();
+                
                 // Pass 1: Estimate offsets and Register Labels
-                // For a true 100% two-pass assembler we'd need exact byte sizes,
-                // but since all our JMPs/JEs use rel32, they are always length 6 (0F 8X 00 00 00 00) or length 5 (E9 00 00 00 00).
                 let mut temp_offset = current_offset;
                 for item in &func.instructions {
                     match item {
                         crate::ir::FunctionItem::Instruction(inst) => {
-                            // Rough estimation by encoding it (fast enough for now)
-                            if let Ok(encoded) = encoder.encode(inst) {
+                            // Rough estimation by encoding it without local knowledge
+                            if let Ok(encoded) = encoder.encode(inst, None, temp_offset as u32) {
                                 temp_offset += encoded.bytes.len();
                             } else {
                                 temp_offset += 1; // NOP
@@ -273,6 +273,7 @@ impl CoffObject {
                         }
                         crate::ir::FunctionItem::Label(lbl) => {
                             self.add_symbol(lbl, temp_offset as u32, self.sections.len() as i16 + 1, 3);
+                            local_labels.insert(lbl.clone(), temp_offset as u32);
                         }
                         _ => {}
                     }
@@ -281,15 +282,15 @@ impl CoffObject {
                 // Pass 2: Encode and resolve
                 for item in &func.instructions {
                     if let crate::ir::FunctionItem::Instruction(inst) = item {
-                        match encoder.encode(inst) {
+                        let inst_offset = raw_data.len() as u32;
+                        match encoder.encode(inst, Some(&local_labels), inst_offset) {
                             Ok(encoded) => {
-                                let inst_start = raw_data.len() as u32;
                                 raw_data.extend(encoded.bytes);
                                 
-                                // Register relocations
+                                // Register relocations (only externals, locals are resolved)
                                 for req in encoded.relocations {
                                     let sym_idx = self.get_or_add_external_symbol(&req.symbol);
-                                    sec_relocs.push((inst_start + req.offset, sym_idx, req.rel_type));
+                                    sec_relocs.push((inst_offset + req.offset, sym_idx, req.rel_type));
                                 }
                             }
                             Err(_) => {

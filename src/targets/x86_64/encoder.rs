@@ -1,348 +1,289 @@
-//! x86-64 Native Machine Code Encoder
-//! Transforms ASM-BIB IR Instructions into raw byte sequences for COFF sections.
+use crate::ir::{Instruction, Opcode, Operand};
 
-use crate::ir::{Instruction, Opcode, Operand, Register};
-use std::collections::HashMap;
+use super::sib;
+use super::vex;
 
-/// Result of an encoding operation containing machine code and necessary relocations (e.g., symbol jumps)
 pub struct EncodedInstruction {
     pub bytes: Vec<u8>,
     pub relocations: Vec<RelocationReq>,
 }
 
 pub struct RelocationReq {
-    pub offset: u32,       // offset within the instruction bytes
-    pub symbol: String,    // target symbol name
-    pub rel_type: u16,     // COFF relocation type (e.g., IMAGE_REL_AMD64_REL32)
+    pub offset: u32,
+    pub symbol: String,
+    pub rel_type: u16,
 }
 
-/// Convert Register to 3-bit ModR/M encoding value, and flags for extended / wide / 16-bit
-fn encode_reg(reg: &Register) -> (u8, bool, bool, bool) {
-    let mut is_wide = true;  // 64-bit default
-    let mut is_32 = false;
-    let mut is_ext = false; // R8-R15
-    
-    let val = match reg {
-        // 64-bit Regs
-        Register::Rax => 0, Register::Rcx => 1, Register::Rdx => 2, Register::Rbx => 3,
-        Register::Rsp => 4, Register::Rbp => 5, Register::Rsi => 6, Register::Rdi => 7,
-        Register::R8 => { is_ext=true; 0 }, Register::R9 => { is_ext=true; 1 },
-        Register::R10 => { is_ext=true; 2 }, Register::R11 => { is_ext=true; 3 },
-        Register::R12 => { is_ext=true; 4 }, Register::R13 => { is_ext=true; 5 },
-        Register::R14 => { is_ext=true; 6 }, Register::R15 => { is_ext=true; 7 },
-        
-        // 32-bit Regs
-        Register::Eax => { is_wide=false; is_32=true; 0 }, Register::Ecx => { is_wide=false; is_32=true; 1 },
-        Register::Edx => { is_wide=false; is_32=true; 2 }, Register::Ebx => { is_wide=false; is_32=true; 3 },
-        Register::Esp => { is_wide=false; is_32=true; 4 }, Register::Ebp => { is_wide=false; is_32=true; 5 },
-        Register::Esi => { is_wide=false; is_32=true; 6 }, Register::Edi => { is_wide=false; is_32=true; 7 },
-        Register::R8d => { is_wide=false; is_32=true; is_ext=true; 0 },
-        Register::R9d => { is_wide=false; is_32=true; is_ext=true; 1 },
-        Register::R10d => { is_wide=false; is_32=true; is_ext=true; 2 },
-        Register::R11d => { is_wide=false; is_32=true; is_ext=true; 3 },
-        Register::R12d => { is_wide=false; is_32=true; is_ext=true; 4 },
-        Register::R13d => { is_wide=false; is_32=true; is_ext=true; 5 },
-        Register::R14d => { is_wide=false; is_32=true; is_ext=true; 6 },
-        Register::R15d => { is_wide=false; is_32=true; is_ext=true; 7 },
-        
-        // SSE XMM
-        Register::Xmm(n) => { is_wide=false; is_ext = *n > 7; *n & 7 },
-        
-        _ => { is_wide = false; 0 }, // 16-bit / 8-bit fallback
-    };
-    
-    (val, is_ext, is_wide, is_32)
-}
+use std::collections::HashMap;
 
-/// Generate ModR/M byte
-fn modrm(mod_val: u8, reg: u8, rm: u8) -> u8 {
-    ((mod_val & 3) << 6) | ((reg & 7) << 3) | (rm & 7)
-}
-
-/// Determine REX prefix requirement
-fn build_rex(w: bool, r: bool, x: bool, b: bool) -> Option<u8> {
-    if !w && !r && !x && !b {
-        None
-    } else {
-        let mut prefix = 0x40;
-        if w { prefix |= 0x08; }
-        if r { prefix |= 0x04; }
-        if x { prefix |= 0x02; }
-        if b { prefix |= 0x01; }
-        Some(prefix)
-    }
-}
-
-pub fn encode_instruction(inst: &Instruction) -> Result<EncodedInstruction, String> {
+pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u32>>, current_offset: u32) -> Result<EncodedInstruction, String> {
     let mut bytes = Vec::new();
     let mut relocations = Vec::new();
 
     match inst.opcode {
+        // --- 1. Basic Flow ---
         Opcode::Push => {
             if let Some(Operand::Reg(r)) = inst.operands.get(0) {
-                let (reg_val, is_ext, _, _) = encode_reg(r);
-                if let Some(rex) = build_rex(false, false, false, is_ext) { bytes.push(rex); }
-                bytes.push(0x50 + reg_val);
+                let ri = sib::encode_reg(r);
+                if let Some(rex) = sib::build_rex(false, false, false, ri.is_ext) { bytes.push(rex); }
+                bytes.push(0x50 + ri.val);
             }
         }
         Opcode::Pop => {
             if let Some(Operand::Reg(r)) = inst.operands.get(0) {
-                let (reg_val, is_ext, _, _) = encode_reg(r);
-                if let Some(rex) = build_rex(false, false, false, is_ext) { bytes.push(rex); }
-                bytes.push(0x58 + reg_val);
+                let ri = sib::encode_reg(r);
+                if let Some(rex) = sib::build_rex(false, false, false, ri.is_ext) { bytes.push(rex); }
+                bytes.push(0x58 + ri.val);
             }
         }
-        Opcode::Sub | Opcode::Add | Opcode::Cmp => {
+        Opcode::Ret => { bytes.push(0xC3); }
+        Opcode::Leave => { bytes.push(0xC9); }
+
+        // --- 2. Advanced Arithmetic & Logic (SUB/ADD/CMP) ---
+        Opcode::Sub | Opcode::Add | Opcode::Cmp | Opcode::Xor => {
             if inst.operands.len() == 2 {
                 let opc_base = match inst.opcode {
-                    Opcode::Add => 0x00,
-                    Opcode::Sub => 0x28,
-                    Opcode::Cmp => 0x38,
+                    Opcode::Add => 0x00, Opcode::Sub => 0x28, Opcode::Cmp => 0x38, Opcode::Xor => 0x30,
                     _ => unreachable!(),
                 };
-                
+                let sub_op_ext = match inst.opcode {
+                    Opcode::Add => 0, Opcode::Sub => 5, Opcode::Cmp => 7, Opcode::Xor => 6,
+                    _ => 0,
+                };
                 match (&inst.operands[0], &inst.operands[1]) {
                     (Operand::Reg(dst), Operand::Imm(imm)) => {
-                        let (dst_v, dst_e, w, dst_32) = encode_reg(dst);
-                        let sub_op_ext = match inst.opcode {
-                            Opcode::Add => 0,
-                            Opcode::Sub => 5,
-                            Opcode::Cmp => 7,
-                            _ => 0,
-                        };
-                        
-                        if let Some(rex) = build_rex(w, false, false, dst_e) { bytes.push(rex); }
-                        
-                        let imm_val = *imm;
-                        if -128 <= imm_val && imm_val <= 127 { // 8-bit imm
+                        let d_info = sib::encode_reg(dst);
+                        if let Some(rex) = sib::build_rex(d_info.is_wide, false, false, d_info.is_ext) { bytes.push(rex); }
+                        let v = *imm;
+                        if -128 <= v && v <= 127 {
                             bytes.push(0x83);
-                            bytes.push(modrm(3, sub_op_ext, dst_v));
-                            bytes.push((imm_val as i8) as u8);
-                        } else { // 32-bit imm
-                            bytes.push(0x81);
-                            bytes.push(modrm(3, sub_op_ext, dst_v));
-                            bytes.extend_from_slice(&(imm_val as i32).to_le_bytes());
+                            bytes.push(sib::modrm(3, sub_op_ext, d_info.val));
+                            bytes.push(v as i8 as u8);
+                        } else {
+                            if d_info.val == 0 { // special optimized AL/AX/EAX/RAX
+                                bytes.push(if d_info.is_8 { 0x04 | opc_base } else { 0x05 | opc_base });
+                                bytes.extend_from_slice(&(v as i32).to_le_bytes()); // RAX also uses 32bit sign-extended
+                            } else {
+                                bytes.push(0x81);
+                                bytes.push(sib::modrm(3, sub_op_ext, d_info.val));
+                                bytes.extend_from_slice(&(v as i32).to_le_bytes());
+                            }
                         }
                     }
                     (Operand::Reg(dst), Operand::Reg(src)) => {
-                        let (dst_v, dst_e, w, dst_32) = encode_reg(dst);
-                        let (src_v, src_e, _, _) = encode_reg(src);
-                        if let Some(rex) = build_rex(w, src_e, false, dst_e) { bytes.push(rex); }
-                        bytes.push(opc_base + 1); // e.g. 0x29 for Sub
-                        bytes.push(modrm(3, src_v, dst_v));
+                        let d_info = sib::encode_reg(dst);
+                        let s_info = sib::encode_reg(src);
+                        // Prefix 0x66 for 16 bit
+                        if d_info.is_16 { bytes.push(0x66); }
+                        
+                        let w = if d_info.is_32 || d_info.is_16 || d_info.is_8 { false } else { true };
+                        // optimization: XOR reg, reg (like xor ecx, ecx) drops REX.W
+                        let w_actual = if inst.opcode == Opcode::Xor { false } else { w };
+                        
+                        if let Some(rex) = sib::build_rex(w_actual, s_info.is_ext, false, d_info.is_ext) { bytes.push(rex); }
+                        bytes.push(opc_base + if d_info.is_8 { 0 } else { 1 });
+                        bytes.push(sib::modrm(3, s_info.val, d_info.val));
                     }
                     _ => {}
                 }
             }
         }
-        Opcode::Dec => {
-            if let Some(Operand::Reg(r)) = inst.operands.get(0) {
-                let (reg_val, is_ext, w, _) = encode_reg(r);
-                if let Some(rex) = build_rex(w, false, false, is_ext) { bytes.push(rex); }
-                bytes.push(0xFF);
-                bytes.push(modrm(3, 1, reg_val));
-            }
-        }
-        Opcode::Test => {
-            if let (Some(Operand::Reg(dst)), Some(Operand::Reg(src))) = (inst.operands.get(0), inst.operands.get(1)) {
-                let (dst_v, dst_e, w, _) = encode_reg(dst);
-                let (src_v, src_e, _, _) = encode_reg(src);
-                if let Some(rex) = build_rex(w, src_e, false, dst_e) { bytes.push(rex); }
-                bytes.push(0x85);
-                bytes.push(modrm(3, src_v, dst_v));
-            }
-        }
-        Opcode::Imul => {
-            if inst.operands.len() == 2 {
-                if let (Operand::Reg(dst), Operand::Reg(src)) = (&inst.operands[0], &inst.operands[1]) {
-                    let (dst_v, dst_e, w, _) = encode_reg(dst);
-                    let (src_v, src_e, _, _) = encode_reg(src);
-                    if let Some(rex) = build_rex(w, dst_e, false, src_e) { bytes.push(rex); }
-                    bytes.push(0x0F);
-                    bytes.push(0xAF);
-                    bytes.push(modrm(3, dst_v, src_v));
-                }
-            }
-        }
-        Opcode::Xor => {
-            if let (Some(Operand::Reg(dst)), Some(Operand::Reg(src))) = (inst.operands.get(0), inst.operands.get(1)) {
-                let (dst_v, dst_e, w, d32) = encode_reg(dst);
-                let (src_v, src_e, _, _) = encode_reg(src);
-                // For 'xor ecx, ecx', dropping REX.W is ideal even in 64-bit to clear full RCX
-                if let Some(rex) = build_rex(w, src_e, false, dst_e) { bytes.push(rex); }
-                bytes.push(0x31);
-                bytes.push(modrm(3, src_v, dst_v));
-            }
-        }
+        
+        // --- 3. Dynamic Memory Loading (MOV / LEA SIB mapping) ---
         Opcode::Mov => {
-            if let (Some(Operand::Reg(dst)), Some(Operand::Reg(src))) = (inst.operands.get(0), inst.operands.get(1)) {
-                let (dst_v, dst_e, w, _) = encode_reg(dst);
-                let (src_v, src_e, _, _) = encode_reg(src);
-                if let Some(rex) = build_rex(w, src_e, false, dst_e) { bytes.push(rex); }
-                bytes.push(0x89);
-                bytes.push(modrm(3, src_v, dst_v));
-            }
-            if let (Some(Operand::Reg(dst)), Some(Operand::Imm(imm))) = (inst.operands.get(0), inst.operands.get(1)) {
-                let (dst_v, dst_e, w, is32) = encode_reg(dst);
-                let imm_val = *imm;
-                
-                if w && (imm_val > i32::MAX as i64 || imm_val < i32::MIN as i64) {
-                    // Full 64-bit mov: REX.W B8+rg imm64
-                    if let Some(rex) = build_rex(true, false, false, dst_e) { bytes.push(rex); }
-                    bytes.push(0xB8 + dst_v);
-                    bytes.extend_from_slice(&imm_val.to_le_bytes());
-                } else if is32 {
-                    // 32-bit imm to 32 bit register B8+rg imm32
-                    if let Some(rex) = build_rex(false, false, false, dst_e) { bytes.push(rex); }
-                    bytes.push(0xB8 + dst_v);
-                    bytes.extend_from_slice(&(imm_val as i32).to_le_bytes());
-                } else {
-                    // C7 mov r/m, imm32 with REX.W
-                    if let Some(rex) = build_rex(w, false, false, dst_e) { bytes.push(rex); }
-                    bytes.push(0xC7);
-                    bytes.push(modrm(3, 0, dst_v));
-                    bytes.extend_from_slice(&(imm_val as i32).to_le_bytes());
-                }
-            }
-            if let (Some(Operand::Reg(dst)), Some(Operand::Memory { base: Some(b), index: None, disp, .. })) = (inst.operands.get(0), inst.operands.get(1)) {
-                let (dst_v, dst_e, w, _) = encode_reg(dst);
-                let (base_v, base_e, _, _) = encode_reg(b);
-                if let Some(rex) = build_rex(w, dst_e, false, base_e) { bytes.push(rex); }
-                bytes.push(0x8B); // MOV r, r/m
-                if *disp == 0 && base_v != 5 {
-                    bytes.push(modrm(0, dst_v, base_v));
-                } else if *disp >= -128 && *disp <= 127 {
-                    bytes.push(modrm(1, dst_v, base_v));
-                    bytes.push(*disp as i8 as u8);
-                } else {
-                    bytes.push(modrm(2, dst_v, base_v));
-                    bytes.extend_from_slice(&(*disp as i32).to_le_bytes());
+            if inst.operands.len() == 2 {
+                match (&inst.operands[0], &inst.operands[1]) {
+                    (Operand::Reg(dst), Operand::Reg(src)) => {
+                        let d_info = sib::encode_reg(dst);
+                        let s_info = sib::encode_reg(src);
+                        if d_info.is_16 { bytes.push(0x66); }
+                        let w = !d_info.is_8 && !d_info.is_16 && !d_info.is_32;
+                        if let Some(rex) = sib::build_rex(w, s_info.is_ext, false, d_info.is_ext) { bytes.push(rex); }
+                        bytes.push(0x88 + if d_info.is_8 { 0 } else { 1 });
+                        bytes.push(sib::modrm(3, s_info.val, d_info.val));
+                    }
+                    (Operand::Reg(dst), Operand::Imm(imm)) => {
+                        let d_info = sib::encode_reg(dst);
+                        let v = *imm;
+                        if d_info.is_16 { bytes.push(0x66); }
+                        let w = !d_info.is_8 && !d_info.is_16 && !d_info.is_32;
+                        
+                        if w {
+                            if v > i32::MAX as i64 || v < i32::MIN as i64 {
+                                // 64 bit absolute mov B8+rd
+                                if let Some(rex) = sib::build_rex(true, false, false, d_info.is_ext) { bytes.push(rex); }
+                                bytes.push(0xB8 + d_info.val);
+                                bytes.extend_from_slice(&v.to_le_bytes());
+                            } else {
+                                // 64 bit with 32 bit sign-extended immediate: C7 /0
+                                if let Some(rex) = sib::build_rex(true, false, false, d_info.is_ext) { bytes.push(rex); }
+                                bytes.push(0xC7);
+                                bytes.push(sib::modrm(3, 0, d_info.val));
+                                bytes.extend_from_slice(&(v as i32).to_le_bytes());
+                            }
+                        } else {
+                            if let Some(rex) = sib::build_rex(false, false, false, d_info.is_ext) { bytes.push(rex); }
+                            bytes.push(if d_info.is_8 { 0xB0 } else { 0xB8 } + d_info.val);
+                            if d_info.is_8 { bytes.push(v as u8); } 
+                            else if d_info.is_16 { bytes.extend_from_slice(&(v as u16).to_le_bytes()); }
+                            else { bytes.extend_from_slice(&(v as i32).to_le_bytes()); }
+                        }
+                    }
+                    (Operand::Reg(dst), Operand::Memory { base, index, scale, disp }) => {
+                        let d_info = sib::encode_reg(dst);
+                        let mem = sib::resolve_memory(d_info.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                        if d_info.is_16 { bytes.push(0x66); }
+                        let w = !d_info.is_8 && !d_info.is_16 && !d_info.is_32;
+                        if let Some(rex) = sib::build_rex(w, d_info.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                        bytes.push(0x8A + if d_info.is_8 { 0 } else { 1 });
+                        bytes.extend(mem.payload);
+                    }
+                    (Operand::Memory { base, index, scale, disp }, Operand::Reg(src)) => {
+                        let s_info = sib::encode_reg(src);
+                        let mem = sib::resolve_memory(s_info.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                        if s_info.is_16 { bytes.push(0x66); }
+                        let w = !s_info.is_8 && !s_info.is_16 && !s_info.is_32;
+                        if let Some(rex) = sib::build_rex(w, s_info.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                        bytes.push(0x88 + if s_info.is_8 { 0 } else { 1 });
+                        bytes.extend(mem.payload);
+                    }
+                    _ => {}
                 }
             }
         }
         Opcode::Lea => {
-            if let (Some(Operand::Reg(dst)), Some(Operand::Label(lbl))) = (inst.operands.get(0), inst.operands.get(1)) {
-                let (dst_v, dst_e, w, _) = encode_reg(dst);
-                if let Some(rex) = build_rex(w, dst_e, false, false) { bytes.push(rex); }
-                bytes.push(0x8D);
-                // RIP-relative: mod=0, rm=5 -> disp32
-                bytes.push(modrm(0, dst_v, 5));
-                bytes.extend_from_slice(&[0, 0, 0, 0]); // Blank offset for linker
-                relocations.push(RelocationReq {
-                    offset: bytes.len() as u32 - 4,
-                    symbol: lbl.clone(),
-                    rel_type: 0x0004, // IMAGE_REL_AMD64_REL32
-                });
-            }
-        }
-        Opcode::Jmp => {
-            if let Some(Operand::Label(lbl)) = inst.operands.get(0) {
-                bytes.push(0xE9);
-                bytes.extend_from_slice(&[0, 0, 0, 0]);
-                relocations.push(RelocationReq {
-                    offset: 1,
-                    symbol: lbl.clone(),
-                    rel_type: 0x0004,
-                });
-            }
-        }
-        Opcode::Je | Opcode::Jne => {
-            if let Some(Operand::Label(lbl)) = inst.operands.get(0) {
-                bytes.push(0x0F);
-                bytes.push(if inst.opcode == Opcode::Je { 0x84 } else { 0x85 });
-                bytes.extend_from_slice(&[0, 0, 0, 0]);
-                relocations.push(RelocationReq {
-                    offset: 2,
-                    symbol: lbl.clone(),
-                    rel_type: 0x0004,
-                });
-            }
-        }
-        Opcode::Call => {
-            if let Some(Operand::Label(sym)) = inst.operands.get(0) {
-                bytes.push(0xE8);
-                bytes.extend_from_slice(&[0, 0, 0, 0]);
-                relocations.push(RelocationReq {
-                    offset: 1,
-                    symbol: sym.clone(),
-                    rel_type: 0x0004,
-                });
-            }
-        }
-        
-        // --- SSE Instructions ---
-        Opcode::Cvtsi2ss => { // F3 0F 2A /r
-            if let (Some(Operand::Reg(dst)), Some(Operand::Reg(src))) = (inst.operands.get(0), inst.operands.get(1)) {
-                let (dst_v, dst_e, _, _) = encode_reg(dst);
-                let (src_v, src_e, src_w, _) = encode_reg(src);
-                bytes.push(0xF3);
-                if let Some(rex) = build_rex(src_w, dst_e, false, src_e) { bytes.push(rex); }
-                bytes.push(0x0F); bytes.push(0x2A);
-                bytes.push(modrm(3, dst_v, src_v));
-            }
-        }
-        Opcode::Cvtss2si => { // F3 0F 2D /r
-            if let (Some(Operand::Reg(dst)), Some(Operand::Reg(src))) = (inst.operands.get(0), inst.operands.get(1)) {
-                let (dst_v, dst_e, dst_w, _) = encode_reg(dst);
-                let (src_v, src_e, _, _) = encode_reg(src);
-                bytes.push(0xF3);
-                if let Some(rex) = build_rex(dst_w, dst_e, false, src_e) { bytes.push(rex); }
-                bytes.push(0x0F); bytes.push(0x2D);
-                bytes.push(modrm(3, dst_v, src_v));
-            }
-        }
-        Opcode::Sqrtss => { // F3 0F 51 /r
-            if let (Some(Operand::Reg(dst)), Some(Operand::Reg(src))) = (inst.operands.get(0), inst.operands.get(1)) {
-                let (dst_v, dst_e, _, _) = encode_reg(dst);
-                let (src_v, src_e, _, _) = encode_reg(src);
-                bytes.push(0xF3);
-                if let Some(rex) = build_rex(false, dst_e, false, src_e) { bytes.push(rex); }
-                bytes.push(0x0F); bytes.push(0x51);
-                bytes.push(modrm(3, dst_v, src_v));
-            }
-        }
-        Opcode::Movss => {
-            bytes.push(0xF3);
-            if let (Some(Operand::Reg(dst)), Some(Operand::Memory { base: Some(b), disp, .. })) = (inst.operands.get(0), inst.operands.get(1)) {
-                let (dst_v, dst_e, _, _) = encode_reg(dst);
-                let (base_v, base_e, _, _) = encode_reg(b);
-                if let Some(rex) = build_rex(false, dst_e, false, base_e) { bytes.push(rex); }
-                bytes.push(0x0F); bytes.push(0x10); // MOVSS xmm, m32
-                if *disp == 0 && base_v != 5 {
-                    bytes.push(modrm(0, dst_v, base_v));
-                } else if *disp >= -128 && *disp <= 127 {
-                    bytes.push(modrm(1, dst_v, base_v));
-                    bytes.push(*disp as i8 as u8);
-                } else {
-                    bytes.push(modrm(2, dst_v, base_v));
-                    bytes.extend_from_slice(&(*disp as i32).to_le_bytes());
-                }
-            }
-        }
-        Opcode::Addss => {
-            bytes.push(0xF3);
-            if let (Some(Operand::Reg(dst)), Some(Operand::Memory { base: Some(b), disp, .. })) = (inst.operands.get(0), inst.operands.get(1)) {
-                let (dst_v, dst_e, _, _) = encode_reg(dst);
-                let (base_v, base_e, _, _) = encode_reg(b);
-                if let Some(rex) = build_rex(false, dst_e, false, base_e) { bytes.push(rex); }
-                bytes.push(0x0F); bytes.push(0x58); // ADDSS xmm, m32
-                if *disp == 0 && base_v != 5 {
-                    bytes.push(modrm(0, dst_v, base_v));
-                } else if *disp >= -128 && *disp <= 127 {
-                    bytes.push(modrm(1, dst_v, base_v));
-                    bytes.push(*disp as i8 as u8);
-                } else {
-                    bytes.push(modrm(2, dst_v, base_v));
-                    bytes.extend_from_slice(&(*disp as i32).to_le_bytes());
+            if let Some(Operand::Reg(dst)) = inst.operands.get(0) {
+                let d_info = sib::encode_reg(dst);
+                if let Some(Operand::Label(lbl)) = inst.operands.get(1) {
+                    if let Some(rex) = sib::build_rex(d_info.is_wide, d_info.is_ext, false, false) { bytes.push(rex); }
+                    bytes.push(0x8D);
+                    bytes.push(sib::modrm(0, d_info.val, 5)); // RIP relative
+                    bytes.extend_from_slice(&[0,0,0,0]);
+                    relocations.push(RelocationReq { offset: bytes.len() as u32 - 4, symbol: lbl.clone(), rel_type: 4 });
+                } else if let Some(Operand::Memory { base, index, scale, disp }) = inst.operands.get(1) {
+                    let mem = sib::resolve_memory(d_info.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                    if let Some(rex) = sib::build_rex(d_info.is_wide, d_info.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                    bytes.push(0x8D);
+                    bytes.extend(mem.payload);
                 }
             }
         }
 
-        Opcode::Ret => { bytes.push(0xC3); }
-        Opcode::Leave => { bytes.push(0xC9); }
+        // --- 4. Advanced Floating Point (SSE / AVX2 VEX) ---
+        Opcode::Cvtsi2ss | Opcode::Cvtss2si | Opcode::Sqrtss | Opcode::Movss | Opcode::Addss => {
+            let (is_movss, is_addss, is_cvtsi) = (inst.opcode == Opcode::Movss, inst.opcode == Opcode::Addss, inst.opcode == Opcode::Cvtsi2ss);
+            
+            bytes.push(0xF3); // SSE Prefix
+            
+            if let Some(Operand::Reg(dst)) = inst.operands.get(0) {
+                let d_info = sib::encode_reg(dst);
+                let reg_val = d_info.val;
+                let r_ext = d_info.is_ext;
+                
+                if let Some(Operand::Reg(src)) = inst.operands.get(1) {
+                    let s_info = sib::encode_reg(src);
+                    let (rex_r, rex_b) = if is_cvtsi { (d_info.is_ext, s_info.is_ext) } else { (d_info.is_ext, s_info.is_ext) };
+                    let w = if is_cvtsi { s_info.is_wide } else { d_info.is_wide };
+                    if let Some(rex) = sib::build_rex(w, rex_r, false, rex_b) { bytes.push(rex); }
+                    
+                    bytes.push(0x0F);
+                    bytes.push(match inst.opcode {
+                        Opcode::Cvtsi2ss => 0x2A, Opcode::Cvtss2si => 0x2D, Opcode::Sqrtss => 0x51,
+                        Opcode::Movss => 0x10, Opcode::Addss => 0x58, _ => 0,
+                    });
+                    bytes.push(sib::modrm(3, d_info.val, s_info.val));
+                    
+                } else if let Some(Operand::Memory { base, index, scale, disp }) = inst.operands.get(1) {
+                    let mem = sib::resolve_memory(d_info.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                    if let Some(rex) = sib::build_rex(false, d_info.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                    bytes.push(0x0F);
+                    bytes.push(match inst.opcode { Opcode::Movss => 0x10, Opcode::Addss => 0x58, _ => 0 });
+                    bytes.extend(mem.payload);
+                }
+            }
+        }
         
+        Opcode::Vaddps => {
+            // AVX implementation example: vaddps ymm0, ymm1, ymm2
+            if let (Some(Operand::Reg(dst)), Some(Operand::Reg(src1)), Some(Operand::Reg(src2))) = (inst.operands.get(0), inst.operands.get(1), inst.operands.get(2)) {
+                let d = sib::encode_reg(dst);
+                let s1 = sib::encode_reg(src1);
+                let s2 = sib::encode_reg(src2);
+                
+                let is_256 = true; // YMM usage
+                let vex = vex::build_vex(false, !d.is_ext, !s2.is_ext, !s2.is_ext, 1, Some(src1), is_256, 0);
+                bytes.extend(vex);
+                bytes.push(0x58);
+                bytes.push(sib::modrm(3, d.val, s2.val));
+            }
+        }
+
+        // --- 5. Flow Control (JMP, Calls, Terminals) ---
+        Opcode::Jmp | Opcode::Je | Opcode::Jne => {
+            if let Some(Operand::Label(lbl)) = inst.operands.get(0) {
+                let mut resolved_locally = false;
+                
+                if let Some(map) = labels {
+                    if let Some(&target_offset) = map.get(lbl) {
+                        // Pass 2: We use invariant 32-bit near jumps to match Pass 1 sizes perfectly
+                        // but we resolve the relative delta LOCALLY instead of asking the Linker.
+                        let near_jump_size = if inst.opcode == Opcode::Jmp { 5 } else { 6 };
+                        let delta32 = (target_offset as i64) - ((current_offset + near_jump_size) as i64);
+                        
+                        if inst.opcode == Opcode::Jmp {
+                            bytes.push(0xE9);
+                        } else {
+                            bytes.push(0x0F);
+                            bytes.push(if inst.opcode == Opcode::Je { 0x84 } else { 0x85 });
+                        }
+                        bytes.extend_from_slice(&(delta32 as i32).to_le_bytes());
+                        resolved_locally = true;
+                    }
+                }
+                
+                if !resolved_locally {
+                    if inst.opcode == Opcode::Jmp {
+                        bytes.push(0xE9);
+                    } else {
+                        bytes.push(0x0F);
+                        bytes.push(if inst.opcode == Opcode::Je { 0x84 } else { 0x85 });
+                    }
+                    bytes.extend_from_slice(&[0,0,0,0]);
+                    relocations.push(RelocationReq { offset: bytes.len() as u32 - 4, symbol: lbl.clone(), rel_type: 4 });
+                }
+            }
+        }
+        Opcode::Call => {
+            if let Some(Operand::Label(lbl)) = inst.operands.get(0) {
+                bytes.push(0xE8);
+                bytes.extend_from_slice(&[0,0,0,0]);
+                relocations.push(RelocationReq { offset: 1, symbol: lbl.clone(), rel_type: 4 });
+            }
+        }
+        Opcode::Dec => {
+            if let Some(Operand::Reg(r)) = inst.operands.get(0) {
+                let ri = sib::encode_reg(r);
+                if let Some(rex) = sib::build_rex(ri.is_wide, false, false, ri.is_ext) { bytes.push(rex); }
+                bytes.push(0xFF); bytes.push(sib::modrm(3, 1, ri.val));
+            }
+        }
+        Opcode::Imul => {
+            if let (Some(Operand::Reg(d)), Some(Operand::Reg(s))) = (inst.operands.get(0), inst.operands.get(1)) {
+                let di = sib::encode_reg(d); let si = sib::encode_reg(s);
+                if let Some(rex) = sib::build_rex(di.is_wide, di.is_ext, false, si.is_ext) { bytes.push(rex); }
+                bytes.push(0x0F); bytes.push(0xAF); bytes.push(sib::modrm(3, di.val, si.val));
+            }
+        }
+        Opcode::Test => {
+            if let (Some(Operand::Reg(d)), Some(Operand::Reg(s))) = (inst.operands.get(0), inst.operands.get(1)) {
+                let di = sib::encode_reg(d); let si = sib::encode_reg(s);
+                if let Some(rex) = sib::build_rex(di.is_wide, si.is_ext, false, di.is_ext) { bytes.push(rex); }
+                bytes.push(0x85); bytes.push(sib::modrm(3, si.val, di.val));
+            }
+        }
+
         _ => return Err(format!("Unimplemented binary encoding for {:?}", inst.opcode)),
     }
-    
+
     Ok(EncodedInstruction { bytes, relocations })
 }
