@@ -199,6 +199,7 @@ pub enum AstNode {
     FormatDirective(String),
     OrgDirective(u64),
     SectionDirective(String),
+    IncludeLib(String), // NEW: MSVC Auto-linking .drectve
 
     // Use/Import: use x86_64::sse
     Use {

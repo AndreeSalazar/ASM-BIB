@@ -258,6 +258,19 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
                 bytes.push(0xE8);
                 bytes.extend_from_slice(&[0,0,0,0]);
                 relocations.push(RelocationReq { offset: 1, symbol: lbl.clone(), rel_type: 4 });
+            } else if let Some(Operand::Memory { base, index, scale, disp }) = inst.operands.get(0) {
+                // Invocación a Funciones de VTable COM DirectX 12 
+                // e.g. CALL QWORD PTR [RAX + 0x60] -> FF /2
+                let mem = sib::resolve_memory(2, base.as_ref(), index.as_ref(), *scale, *disp);
+                if let Some(rex) = sib::build_rex(false, false, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                bytes.push(0xFF);
+                bytes.extend(mem.payload);
+            } else if let Some(Operand::Reg(r)) = inst.operands.get(0) {
+                // Invocación a registro: CALL RCX -> FF D1
+                let ri = sib::encode_reg(r);
+                if let Some(rex) = sib::build_rex(false, false, false, ri.is_ext) { bytes.push(rex); }
+                bytes.push(0xFF);
+                bytes.push(sib::modrm(3, 2, ri.val));
             }
         }
         Opcode::Dec => {

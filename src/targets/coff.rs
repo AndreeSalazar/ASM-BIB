@@ -235,6 +235,18 @@ impl CoffObject {
     pub fn encode_program(mut self, program: &Program) -> Result<Vec<u8>, String> {
         let encoder = X86_64Encoder; // Fixed to x64 for now
         
+        // 1. Generate MSVC Autolink .drectve Section if requested
+        if !program.includelibs.is_empty() {
+            let mut drectve_data = String::new();
+            for lib in &program.includelibs {
+                drectve_data.push_str(&format!("/DEFAULTLIB:\"{}\" ", lib));
+            }
+            drectve_data.push('\0');
+            
+            // Characteristics: LNK_INFO (0x200), ALIGN_1BYTES (0x100000), LNK_REMOVE (0x800)
+            self.add_section(".drectve", 0x00100A00, drectve_data.into_bytes());
+        }
+        
         for section in &program.sections {
             let (characteristics, sec_name) = match &section.kind {
                 SectionKind::Text => (IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ | IMAGE_SCN_ALIGN_16BYTES, ".text"),
