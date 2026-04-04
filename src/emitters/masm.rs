@@ -470,7 +470,7 @@ fn emit_operand(op: &Operand, inferred_size: Option<Size>, is_memory_context: bo
             }
         }
         Operand::StringLit(s) => format!("\"{}\"", s),
-        Operand::Memory { base, index, scale, disp } => {
+        Operand::Memory { base, index, scale, disp, .. } => {
             emit_memory(base, index, *scale, *disp, inferred_size)
         }
     }
@@ -747,3 +747,4 @@ fn emit_end(out: &mut String, program: &Program) {
         }
     }
 }
+

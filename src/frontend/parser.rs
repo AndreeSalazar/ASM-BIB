@@ -19,6 +19,9 @@ pub struct Parser {
     pending_externs: Vec<ExternSymbol>,
     pending_includes: Vec<String>,
     pending_includelibs: Vec<String>,
+    current_locals: std::collections::HashMap<String, (i32, u8)>, // name -> (offset, size)
+    current_local_offset: i32,
+    has_prologue: bool, // Track if a prologue is needed to auto-allocate
 }
 
 impl Parser {
@@ -32,6 +35,9 @@ impl Parser {
             pending_externs: Vec::new(),
             pending_includes: Vec::new(),
             pending_includelibs: Vec::new(),
+            current_locals: std::collections::HashMap::new(),
+            current_local_offset: 0,
+            has_prologue: false,
         }
     }
 
@@ -233,6 +239,10 @@ impl Parser {
                     }
                 }
                 Token::Def => {
+                    self.current_locals.clear();
+                    self.current_local_offset = 0;
+                    self.has_prologue = false;
+                    
                     self.advance(); // def
                     let name = self.expect_ident()?;
                     // skip params: (...)
@@ -269,6 +279,17 @@ impl Parser {
                     
                     let mut instructions = Vec::new();
                     let mut local_vars = Vec::new();
+                    
+                    if !self.current_locals.is_empty() && !self.has_prologue {
+                        // Align stack frame to 16 bytes (standard x64 ABI)
+                        let stack_size = (self.current_local_offset + 15) & !15;
+                        instructions.extend(vec![
+                            FunctionItem::Instruction(Instruction::one(Opcode::Push, Operand::Reg(Register::Rbp))),
+                            FunctionItem::Instruction(Instruction::two(Opcode::Mov, Operand::Reg(Register::Rbp), Operand::Reg(Register::Rsp))),
+                            FunctionItem::Instruction(Instruction::two(Opcode::Sub, Operand::Reg(Register::Rsp), Operand::Imm(stack_size as i64))),
+                        ]);
+                    }
+
                     for item in items {
                         if let FunctionItem::LocalVar(v) = item {
                             local_vars.push(v);
@@ -625,6 +646,20 @@ impl Parser {
                             }
                             let type_name = self.expect_string_or_ident()?;
                             self.expect_rparen()?;
+                            
+                            let (size, _) = match type_name.to_lowercase().as_str() {
+                                "byte" => (1, "BYTE"),
+                                "word" => (2, "WORD"),
+                                "dword" => (4, "DWORD"),
+                                _ => (8, "QWORD"),
+                            };
+                            
+                            // Align local offset
+                            self.current_local_offset = (self.current_local_offset + (size - 1)) & !(size - 1);
+                            self.current_local_offset += size;
+                            
+                            self.current_locals.insert(var_name.clone(), (self.current_local_offset, size as u8));
+                            
                             items.push(FunctionItem::LocalVar(crate::ir::LocalVar {
                                 name: var_name,
                                 type_name,
@@ -792,7 +827,7 @@ impl Parser {
                     }
                 }
 
-                Ok(Expr::Memory(Box::new(MemExpr { base, index, scale, disp })))
+                Ok(Expr::Memory(Box::new(MemExpr { base, index, scale, disp, size: None })))
             }
             other => Err(format!("unexpected token in expression: {:?}", other)),
         }
@@ -812,10 +847,34 @@ impl Parser {
             Expr::Register(name) => {
                 Register::from_str(name)
                     .map(Operand::Reg)
-                    .unwrap_or_else(|| Operand::Label(name.clone()))
+                    .unwrap_or_else(|| {
+                        if let Some(&(offset, sz)) = self.current_locals.get(name) {
+                            Operand::Memory {
+                                base: Some(Register::Rbp),
+                                index: None,
+                                scale: 1,
+                                disp: -(offset as i64),
+                                size: Some(sz),
+                            }
+                        } else {
+                            Operand::Label(name.clone())
+                        }
+                    })
             }
             Expr::Immediate(v) => Operand::Imm(*v),
-            Expr::Label(s) => Operand::Label(s.clone()),
+            Expr::Label(s) => {
+                if let Some(&(offset, sz)) = self.current_locals.get(s) {
+                    Operand::Memory {
+                        base: Some(Register::Rbp),
+                        index: None,
+                        scale: 1,
+                        disp: -(offset as i64),
+                        size: Some(sz),
+                    }
+                } else {
+                    Operand::Label(s.clone())
+                }
+            }
             Expr::StringLit(s) => Operand::StringLit(s.clone()),
             Expr::Memory(mem) => {
                 let base_reg = mem.base.as_ref().and_then(|r| Register::from_str(r));
@@ -836,6 +895,7 @@ impl Parser {
                     index: index_reg,
                     scale: mem.scale,
                     disp: mem.disp,
+                    size: mem.size,
                 }
             }
             Expr::Bool(true) => Operand::Imm(1),
@@ -845,19 +905,34 @@ impl Parser {
                 let lower = name.to_lowercase();
                 match lower.as_str() {
                     "byte" | "word" | "dword" | "qword" => {
+                        let target_sz = match lower.as_str() {
+                            "byte" => 1,
+                            "word" => 2,
+                            "dword" => 4,
+                            _ => 8,
+                        };
+                        
                         if let Some(inner) = args.first() {
                             let inner_op = self.expr_to_operand(inner);
                             match inner_op {
                                 Operand::Label(label_name) => {
-                                    // e.g. dword(choice) → Label("[choice]") which emitter
-                                    // will prepend with DWORD PTR
                                     Operand::Label(format!("[{}]", label_name))
                                 }
-                                Operand::Memory { base, index, scale, disp } => {
-                                    Operand::Memory { base, index, scale, disp }
+                                Operand::Memory { base, index, scale, disp, size: _ } => {
+                                    Operand::Memory { base, index, scale, disp, size: Some(target_sz) }
                                 }
                                 _ => inner_op,
                             }
+                        } else {
+                            Operand::Label(name.clone())
+                        }
+                    }
+                    // offset(label) macro in PASM
+                    "offset" => {
+                        if let Some(Expr::Label(l)) = args.first() {
+                            Operand::Label(l.clone())
+                        } else if let Some(inner) = args.first() {
+                            self.expr_to_operand(inner)
                         } else {
                             Operand::Label(name.clone())
                         }
@@ -1163,7 +1238,7 @@ impl Parser {
         for (i, arg) in invoke_args.iter().enumerate().skip(4) {
             let offset = 32 + (i - 4) * 8;
             let arg_op = self.expr_to_operand(arg);
-            let mem_op = Operand::Memory { base: Some(Register::Rsp), index: None, scale: 1, disp: offset as i64 };
+            let mem_op = Operand::Memory { base: Some(Register::Rsp), index: None, scale: 1, disp: offset as i64, size: None };
             
             match arg_op {
                Operand::Label(_) => {
@@ -1539,3 +1614,4 @@ impl Parser {
         }
     }
 }
+

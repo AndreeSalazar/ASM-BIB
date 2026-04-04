@@ -7,8 +7,8 @@
 @includelib('user32.lib')
 
 @section('.data')
-msg_title = db("ASM-BIB Test")
-msg_text = db("Fase 7+8 OK! COFF Production Quality.")
+msg_title = string("ASM-BIB Test")
+msg_text = string("Fase 7+8 OK! COFF Production Quality.")
 
 @section('.text')
 

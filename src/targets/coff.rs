@@ -148,6 +148,49 @@ impl CoffObject {
         self.symbols.len() as u32 - 1
     }
 
+    pub fn add_section_aux_symbol(&mut self, parent_idx: u32, size: u32, relocs: u16, lines: u16, checksum: u32, sec_num: u16, selection: u8) {
+        let mut data = [0u8; 18];
+        data[0..4].copy_from_slice(&size.to_le_bytes());
+        data[4..6].copy_from_slice(&relocs.to_le_bytes());
+        data[6..8].copy_from_slice(&lines.to_le_bytes());
+        data[8..12].copy_from_slice(&checksum.to_le_bytes());
+        data[12..14].copy_from_slice(&sec_num.to_le_bytes());
+        data[14] = selection;
+        
+        let mut name = [0u8; 8];
+        name.copy_from_slice(&data[0..8]);
+        let value = u32::from_le_bytes(data[8..12].try_into().unwrap());
+        let sec = i16::from_le_bytes(data[12..14].try_into().unwrap());
+        let typ = u16::from_le_bytes(data[14..16].try_into().unwrap());
+        let sc = data[16];
+        let aux = data[17];
+        
+        self.symbols.push((name, value, sec, typ, sc, aux));
+        self.header.number_of_symbols += 1;
+        self.symbols[parent_idx as usize].5 += 1;
+    }
+
+    pub fn add_function_aux_symbol(&mut self, parent_idx: u32, total_size: u32, ptr_to_lines: u32, ptr_to_next_func: u32) {
+        let mut data = [0u8; 18];
+        data[0..4].copy_from_slice(&0u32.to_le_bytes()); // tag index
+        data[4..8].copy_from_slice(&total_size.to_le_bytes());
+        data[8..12].copy_from_slice(&ptr_to_lines.to_le_bytes());
+        data[12..16].copy_from_slice(&ptr_to_next_func.to_le_bytes());
+        data[16..18].copy_from_slice(&0u16.to_le_bytes()); // unused
+        
+        let mut name = [0u8; 8];
+        name.copy_from_slice(&data[0..8]);
+        let value = u32::from_le_bytes(data[8..12].try_into().unwrap());
+        let sec = i16::from_le_bytes(data[12..14].try_into().unwrap());
+        let typ = u16::from_le_bytes(data[14..16].try_into().unwrap());
+        let sc = data[16];
+        let aux = data[17];
+        
+        self.symbols.push((name, value, sec, typ, sc, aux));
+        self.header.number_of_symbols += 1;
+        self.symbols[parent_idx as usize].5 += 1;
+    }
+
     pub fn build(mut self) -> Vec<u8> {
         let mut binary = Vec::new();
         
@@ -308,6 +351,10 @@ impl CoffObject {
                 // Register symbol for the function
                 let func_sym_idx = self.add_symbol(&func.name, current_offset as u32, self.sections.len() as i16 + 1, 2); // Class 2 = External
                 
+                // FASE 8: Add Function Aux Symbol IMMEDIATELY (COFF requirement). Use dummy size, update later.
+                let func_aux_idx = self.symbols.len();
+                self.add_function_aux_symbol(func_sym_idx, 0, 0, 0);
+                
                 let mut local_labels = std::collections::HashMap::new();
                 
                 // Pass 1: Estimate offsets and Register Labels
@@ -354,7 +401,13 @@ impl CoffObject {
                 }
                 
                 let func_end_offset = raw_data.len();
-                pdata_entries.push((func_sym_idx, (func_end_offset - func_start_offset) as u32));
+                let f_size = (func_end_offset - func_start_offset) as u32;
+                
+                // Update the function aux symbol with the real size
+                // The size is located at bytes 4..8 of the Aux record, which corresponds to sym.0[4..8]
+                self.symbols[func_aux_idx].0[4..8].copy_from_slice(&f_size.to_le_bytes());
+                
+                pdata_entries.push((func_sym_idx, f_size));
                 
                 current_offset = raw_data.len();
             }
@@ -410,8 +463,15 @@ impl CoffObject {
                 serialize_data_def(&item.def, &mut raw_data);
             }
 
+            let raw_data_len = raw_data.len() as u32;
+            let num_relocs = sec_relocs.len() as u16;
             let sec_idx = self.add_section(sec_name, characteristics, raw_data);
             self.relocations[sec_idx - 1] = sec_relocs;
+            
+            // FASE 8: Aux symbol records for the Section itself
+            let sec_sym_idx = self.add_symbol(sec_name, 0, sec_idx as i16, 3); // Class 3 = Static
+            let is_comdat = if (characteristics & IMAGE_SCN_LNK_COMDAT) != 0 { 2 } else { 0 }; // 2 = ANY
+            self.add_section_aux_symbol(sec_sym_idx, raw_data_len, num_relocs, 0, 0, sec_idx as u16, is_comdat);
         }
 
         // 2. Generate .pdata and .xdata Windows SEH (Structured Exception Handling)
@@ -487,9 +547,11 @@ impl CoffObject {
                 }
             }
             
+            let xdata_len = xdata.len() as u32;
             let xdata_characteristics = 0x40300040; // INITIALIZED_DATA | MEM_READ | ALIGN_4BYTES
-            let xdata_base_sym_idx = self.add_symbol(".xdata", 0, self.sections.len() as i16 + 1, 3);
-            self.add_section(".xdata", xdata_characteristics, xdata);
+            let xdata_sec_idx = self.add_section(".xdata", xdata_characteristics, xdata);
+            let xdata_base_sym_idx = self.add_symbol(".xdata", 0, xdata_sec_idx as i16, 3);
+            self.add_section_aux_symbol(xdata_base_sym_idx, xdata_len, 0, 0, 0, xdata_sec_idx as u16, 0);
             
             // === Build .pdata ===
             let mut pdata = Vec::new();
@@ -513,8 +575,13 @@ impl CoffObject {
                 pdata_relocs.push((offset + 8, xdata_base_sym_idx, 3));
             }
             
+            let pdata_len = pdata.len() as u32;
+            let pdata_num_relocs = pdata_relocs.len() as u16;
             let pdata_sec_idx = self.add_section(".pdata", pdata_characteristics, pdata);
             self.relocations[pdata_sec_idx - 1] = pdata_relocs;
+            
+            let pdata_sym_idx = self.add_symbol(".pdata", 0, pdata_sec_idx as i16, 3);
+            self.add_section_aux_symbol(pdata_sym_idx, pdata_len, pdata_num_relocs, 0, 0, pdata_sec_idx as u16, 0);
         }
 
         Ok(self.build())

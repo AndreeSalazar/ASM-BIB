@@ -10,7 +10,7 @@ fn emit_operand(op: &Operand) -> String {
         Operand::Reg(r) => r.name(),
         Operand::Imm(v) => format_imm(*v),
         Operand::Label(name) => name.clone(),
-        Operand::Memory { base, index, scale, disp } => {
+        Operand::Memory { base, index, scale, disp, .. } => {
             emit_memory(base.as_ref(), index.as_ref(), *scale, *disp)
         }
         Operand::StringLit(s) => emit_string_operand(s),
@@ -270,3 +270,4 @@ impl Emitter for NasmEmitter {
         out
     }
 }
+

@@ -582,6 +582,7 @@ pub enum Operand {
         index: Option<Register>,
         scale: u8,
         disp: i64,
+        size: Option<u8>,
     },
     StringLit(String),
 }

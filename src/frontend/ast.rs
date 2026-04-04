@@ -94,6 +94,7 @@ pub struct MemExpr {
     pub index: Option<String>,
     pub scale: u8,
     pub disp: i64,
+    pub size: Option<u8>,
 }
 
 /// Struct field definition
