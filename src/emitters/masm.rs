@@ -1,5 +1,5 @@
 use crate::ir::*;
-use crate::ir::section::CallingConv;
+use crate::ir::section::{CallingConv, SehDirective};
 use crate::emitters::{Emitter, OutputFormat};
 
 pub struct MasmEmitter;
@@ -356,15 +356,17 @@ fn emit_function(out: &mut String, func: &Function, _program: &Program) {
         _ => "",
     };
 
+    let frame_str = if func.has_frame { " FRAME" } else { "" };
+
     // PROC header with params
     if func.params.is_empty() {
-        out.push_str(&format!("{} PROC{}\n", func.name, cc_str));
+        out.push_str(&format!("{} PROC{}{}\n", func.name, cc_str, frame_str));
     } else {
         let params: Vec<String> = func.params.iter().map(|p| {
             let type_name = size_to_masm_type(p.size);
             format!("{}:{}", p.name, type_name)
         }).collect();
-        out.push_str(&format!("{} PROC{} {}\n", func.name, cc_str, params.join(", ")));
+        out.push_str(&format!("{} PROC{}{} {}\n", func.name, cc_str, frame_str, params.join(", ")));
     }
 
     // LOCAL declarations
@@ -373,6 +375,20 @@ fn emit_function(out: &mut String, func: &Function, _program: &Program) {
             format!("{}:{}", v.name, v.type_name)
         }).collect();
         out.push_str(&format!("    LOCAL {}\n", locals.join(", ")));
+    }
+
+    // SEH unwind directives
+    for seh in &func.seh_directives {
+        match seh {
+            SehDirective::AllocStack(n) => out.push_str(&format!("    .ALLOCSTACK {}\n", n)),
+            SehDirective::PushReg(reg) => out.push_str(&format!("    .PUSHREG {}\n", reg)),
+            SehDirective::SaveReg(reg, off) => out.push_str(&format!("    .SAVEREG {}, {}\n", reg, off)),
+            SehDirective::SaveXmm128(reg, off) => out.push_str(&format!("    .SAVEXMM128 {}, {}\n", reg, off)),
+            SehDirective::SetFrame(reg, off) => {
+                out.push_str(&format!("    .SETFRAME {}, {}\n", reg, off));
+            }
+            SehDirective::EndProlog => out.push_str("    .ENDPROLOG\n"),
+        }
     }
 
     // Instruction body

@@ -19,6 +19,7 @@ pub struct Parser {
     pending_externs: Vec<ExternSymbol>,
     pending_includes: Vec<String>,
     pending_includelibs: Vec<String>,
+    user_macros: std::collections::HashMap<String, Vec<Vec<Token>>>,  // name -> list of body lines (each line is tokens)
     current_locals: std::collections::HashMap<String, (i32, u8)>, // name -> (offset, size)
     current_local_offset: i32,
     has_prologue: bool, // Track if a prologue is needed to auto-allocate
@@ -35,6 +36,7 @@ impl Parser {
             pending_externs: Vec::new(),
             pending_includes: Vec::new(),
             pending_includelibs: Vec::new(),
+            user_macros: std::collections::HashMap::new(),
             current_locals: std::collections::HashMap::new(),
             current_local_offset: 0,
             has_prologue: false,
@@ -97,6 +99,7 @@ impl Parser {
         let mut pending_macro = false;
         let mut pending_align: Option<usize> = None;
         let mut pending_public = false;
+        let mut pending_frame = false;
         let mut pending_calling_conv = CallingConv::Default;
 
         self.skip_newlines();
@@ -147,6 +150,7 @@ impl Parser {
                         }
                         "export" => { pending_export = true; }
                         "naked" => { pending_naked = true; pending_calling_conv = CallingConv::Naked; }
+                        "frame" => { pending_frame = true; }
                         "macro" => { pending_macro = true; }
                         "stdcall" => { pending_calling_conv = CallingConv::Stdcall; }
                         "fastcall" => { pending_calling_conv = CallingConv::Fastcall; }
@@ -233,6 +237,52 @@ impl Parser {
                                 }
                             }
                         }
+                        "defmacro" => {
+                            self.expect_lparen()?;
+                            let macro_name = self.expect_string_or_ident()?;
+                            self.expect_rparen()?;
+                            self.skip_newlines();
+                            
+                            // Collect body lines until @endmacro
+                            let mut macro_body: Vec<Vec<Token>> = Vec::new();
+                            let mut current_line: Vec<Token> = Vec::new();
+                            loop {
+                                match self.peek().clone() {
+                                    Token::At => {
+                                        // Check if it's @endmacro
+                                        let save_pos = self.pos;
+                                        self.advance(); // @
+                                        if let Token::Ident(ref s) = self.peek().clone() {
+                                            if s == "endmacro" {
+                                                self.advance(); // endmacro
+                                                if !current_line.is_empty() {
+                                                    macro_body.push(current_line);
+                                                }
+                                                break;
+                                            }
+                                        }
+                                        // Not endmacro, put @ back into the line
+                                        self.pos = save_pos;
+                                        current_line.push(self.advance());
+                                    }
+                                    Token::Newline => {
+                                        self.advance();
+                                        if !current_line.is_empty() {
+                                            macro_body.push(current_line.clone());
+                                            current_line.clear();
+                                        }
+                                    }
+                                    Token::Indent(_) => {
+                                        self.advance(); // skip indent in macro body
+                                    }
+                                    Token::Eof => break,
+                                    _ => {
+                                        current_line.push(self.advance());
+                                    }
+                                }
+                            }
+                            self.user_macros.insert(macro_name, macro_body);
+                        }
                         _ => {
                             self.skip_to_newline();
                         }
@@ -265,11 +315,13 @@ impl Parser {
 
                     let exported = pending_export || pending_public;
                     let naked = pending_naked;
+                    let frame = pending_frame;
                     let _is_macro = pending_macro;
                     let cc = pending_calling_conv.clone();
                     let align = pending_align.take();
                     pending_export = false;
                     pending_naked = false;
+                    pending_frame = false;
                     pending_macro = false;
                     pending_public = false;
                     pending_calling_conv = CallingConv::Default;
@@ -308,6 +360,8 @@ impl Parser {
                         alignment: align,
                         params: Vec::new(),
                         local_vars,
+                        has_frame: frame,
+                        seh_directives: Vec::new(),
                         instructions,
                     };
 
@@ -370,6 +424,8 @@ impl Parser {
                                     alignment: None,
                                     params: Vec::new(),
                                     local_vars: Vec::new(),
+                                    has_frame: false,
+                                    seh_directives: Vec::new(),
                                     instructions,
                                 };
                                 pending_export = false;
@@ -664,6 +720,47 @@ impl Parser {
                                 name: var_name,
                                 type_name,
                             }));
+                        }
+                        "allocstack" => {
+                            self.expect_lparen()?;
+                            let n = self.expect_integer()?;
+                            self.expect_rparen()?;
+                            items.push(FunctionItem::RawDirective(format!(".ALLOCSTACK {}", n)));
+                        }
+                        "pushreg" => {
+                            self.expect_lparen()?;
+                            let reg_name = self.expect_string_or_ident()?;
+                            self.expect_rparen()?;
+                            items.push(FunctionItem::RawDirective(format!(".PUSHREG {}", reg_name)));
+                        }
+                        "savexmm128" => {
+                            self.expect_lparen()?;
+                            let reg_name = self.expect_string_or_ident()?;
+                            self.expect_comma()?;
+                            let offset = self.expect_integer()?;
+                            self.expect_rparen()?;
+                            items.push(FunctionItem::RawDirective(format!(".SAVEXMM128 {}, {}", reg_name, offset)));
+                        }
+                        "savereg" => {
+                            self.expect_lparen()?;
+                            let reg_name = self.expect_string_or_ident()?;
+                            self.expect_comma()?;
+                            let offset = self.expect_integer()?;
+                            self.expect_rparen()?;
+                            items.push(FunctionItem::RawDirective(format!(".SAVEREG {}, {}", reg_name, offset)));
+                        }
+                        "setframe" => {
+                            self.expect_lparen()?;
+                            let reg_name = self.expect_string_or_ident()?;
+                            let offset = if matches!(self.peek(), Token::Comma) {
+                                self.advance();
+                                self.expect_integer()?
+                            } else { 0 };
+                            self.expect_rparen()?;
+                            items.push(FunctionItem::RawDirective(format!(".SETFRAME {}, {}", reg_name, offset)));
+                        }
+                        "endprolog" => {
+                            items.push(FunctionItem::RawDirective(".ENDPROLOG".to_string()));
                         }
                         "default" => {
                             let mut prev_lbl = None;
@@ -1202,7 +1299,22 @@ impl Parser {
             "prologue" => Some(self.expand_prologue(args)?),
             "epilogue" => Some(self.expand_epilogue()?),
             "invoke" => Some(self.expand_invoke(args)?),
-            _ => None,
+            _ => {
+                // Check user-defined macros
+                if let Some(body) = self.user_macros.get(name).cloned() {
+                    let mut expanded = Vec::new();
+                    for line_tokens in &body {
+                        if let Some(Token::Ident(ref inst_name)) = line_tokens.first() {
+                            if let Some(opcode) = Opcode::from_str(inst_name) {
+                                expanded.push(Instruction::zero(opcode));
+                            }
+                        }
+                    }
+                    if expanded.is_empty() { None } else { Some(expanded) }
+                } else {
+                    None
+                }
+            }
         };
         Ok(insts.map(|v| v.into_iter().map(FunctionItem::Instruction).collect()))
     }

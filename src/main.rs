@@ -3,6 +3,7 @@ mod ir;
 mod targets;
 mod emitters;
 mod macros;
+mod linker;
 
 use std::env;
 use std::fs;
@@ -26,6 +27,7 @@ fn main() {
         eprintln!("  --masm     Export MASM Microsoft syntax (.asm)");
         eprintln!("  --step     Show pipeline steps (debug mode)");
         eprintln!("  --build / --exe  Assemble + link → .exe (requires ml64/nasm + link.exe)");
+        eprintln!("  --link     Internal linker → .exe (no link.exe needed!)");
         eprintln!("  --obj      Assemble only → .obj (requires ml64/nasm)");
         eprintln!("  -o FILE    Output file (default: stdout)");
         process::exit(1);
@@ -39,6 +41,7 @@ fn main() {
     let mut build_dll = false;
     let mut build_obj = false;
     let mut internal_native = false;
+    let mut internal_link = false;
 
     let mut i = 2;
     while i < args.len() {
@@ -46,6 +49,7 @@ fn main() {
             "--nasm" => output_format = OutputFormat::Nasm,
             "--masm" => output_format = OutputFormat::Masm,
             "--native" => internal_native = true,
+            "--link" => internal_link = true,
             "--step" => step_mode = true,
             "--build" | "--exe" => build_exe = true,
             "--dll" => { build_exe = true; build_dll = true; }
@@ -234,6 +238,66 @@ fn main() {
                     output_format, total_us);
             }
         }
+    }
+
+    // ── Internal Linker: .pasm → .exe directly (no ml64/link.exe) ──────
+    if internal_link {
+        let base_name = input_file.trim_end_matches(".pasm");
+        let exe_path = if build_dll {
+            format!("{}.dll", base_name)
+        } else {
+            output_file.clone().unwrap_or_else(|| format!("{}.exe", base_name))
+        };
+
+        eprintln!("┌─ INTERNAL LINK ─────────────────────────────────────────────");
+        eprintln!("│  Mode: {} → {}", if build_dll { "DLL" } else { "EXE" }, exe_path);
+
+        let mut config = linker::pe_writer::LinkConfig::default();
+        config.is_dll = build_dll;
+
+        // Auto-detect entry point
+        let exported_funcs: Vec<&str> = program.sections.iter()
+            .flat_map(|s| s.functions.iter())
+            .filter(|f| f.exported)
+            .map(|f| f.name.as_str())
+            .collect();
+        if let Some(entry) = exported_funcs.iter().find(|&&n|
+            n == "main" || n == "_start" || n == "WinMain" || n == "wWinMain"
+            || n == "mainCRTStartup" || n == "WinMainCRTStartup"
+        ) {
+            config.entry_point = entry.to_string();
+        } else if let Some(first) = exported_funcs.first() {
+            config.entry_point = first.to_string();
+        }
+
+        // Auto-detect subsystem
+        if program.format.contains("win") && !program.format.contains("console") {
+            config.subsystem = 2; // WINDOWS
+        }
+
+        // Add explicit INCLUDELIB as extra_libs
+        for lib in &program.includelibs {
+            config.extra_libs.push(lib.clone());
+        }
+
+        let t_link = Instant::now();
+        match linker::link_program(&program, &config) {
+            Ok(pe_bytes) => {
+                let link_us = t_link.elapsed().as_micros();
+                if let Err(e) = fs::write(&exe_path, &pe_bytes) {
+                    eprintln!("│  ❌ Failed to write: {}", e);
+                } else {
+                    eprintln!("│  ✅ Linked OK ({} bytes)", pe_bytes.len());
+                    eprintln!("│  time: {}µs", link_us);
+                    eprintln!("└─ OUTPUT: {}", exe_path);
+                }
+            }
+            Err(e) => {
+                eprintln!("│  ❌ Link failed: {}", e);
+                eprintln!("└────────────────────────────────────────────────────────────");
+            }
+        }
+        return;
     }
 
     // ── Build: assemble + link → .exe ───────────────────────────────────

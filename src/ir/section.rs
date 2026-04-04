@@ -126,6 +126,8 @@ pub struct Function {
     pub alignment: Option<usize>,
     pub params: Vec<FuncParam>,
     pub local_vars: Vec<LocalVar>,
+    pub has_frame: bool,
+    pub seh_directives: Vec<SehDirective>,
     pub instructions: Vec<FunctionItem>,
 }
 
@@ -141,6 +143,17 @@ pub struct FuncParam {
 pub struct LocalVar {
     pub name: String,
     pub type_name: String,
+}
+
+/// SEH (Structured Exception Handling) unwind directives for MASM
+#[derive(Debug, Clone)]
+pub enum SehDirective {
+    AllocStack(i64),
+    PushReg(String),
+    SaveReg(String, i64),
+    SaveXmm128(String, i64),
+    SetFrame(String, i64),
+    EndProlog,
 }
 
 /// Items inside a function
