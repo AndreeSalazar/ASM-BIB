@@ -43,6 +43,20 @@ pub enum Opcode {
     Syscall, Int, Hlt, Cli, Sti, Nop, Cpuid, Iretq,
     Rdtsc, Rdtscp,
 
+    // === Ring 0 Privileged (OS Kernel) ===
+    Lgdt, Sgdt, Lidt, Sidt,        // GDT/IDT management
+    Ltr, Str, Lldt, Sldt,           // Task/LDT management
+    Lmsw, Smsw,                     // Machine Status Word
+    Invlpg,                         // TLB invalidation
+    Swapgs,                         // GS base swap (syscall transition)
+    Wbinvd, Invd,                   // Cache management
+    Clts,                           // Clear Task-Switched flag
+    Rdmsr, Wrmsr,                   // Model-Specific Registers
+    In, Out,                        // I/O port access
+
+    // === Memory Fences ===
+    Mfence, Lfence, Sfence,
+
     // === Bit manipulation ===
     Bt, Bts, Btr, Btc, Bsf, Bsr,
     Popcnt, Lzcnt, Tzcnt,
@@ -213,6 +227,20 @@ impl Opcode {
             "sti" => Some(Opcode::Sti), "nop" => Some(Opcode::Nop),
             "cpuid" => Some(Opcode::Cpuid), "iretq" => Some(Opcode::Iretq),
             "rdtsc" => Some(Opcode::Rdtsc), "rdtscp" => Some(Opcode::Rdtscp),
+            // Ring 0 Privileged
+            "lgdt" => Some(Opcode::Lgdt), "sgdt" => Some(Opcode::Sgdt),
+            "lidt" => Some(Opcode::Lidt), "sidt" => Some(Opcode::Sidt),
+            "ltr" => Some(Opcode::Ltr), "str" => Some(Opcode::Str),
+            "lldt" => Some(Opcode::Lldt), "sldt" => Some(Opcode::Sldt),
+            "lmsw" => Some(Opcode::Lmsw), "smsw" => Some(Opcode::Smsw),
+            "invlpg" => Some(Opcode::Invlpg), "swapgs" => Some(Opcode::Swapgs),
+            "wbinvd" => Some(Opcode::Wbinvd), "invd" => Some(Opcode::Invd),
+            "clts" => Some(Opcode::Clts),
+            "rdmsr" => Some(Opcode::Rdmsr), "wrmsr" => Some(Opcode::Wrmsr),
+            "in" => Some(Opcode::In), "out" => Some(Opcode::Out),
+            // Memory Fences
+            "mfence" => Some(Opcode::Mfence), "lfence" => Some(Opcode::Lfence),
+            "sfence" => Some(Opcode::Sfence),
             // Bit manipulation
             "bt" => Some(Opcode::Bt), "bts" => Some(Opcode::Bts),
             "btr" => Some(Opcode::Btr), "btc" => Some(Opcode::Btc),
@@ -434,6 +462,20 @@ impl Opcode {
             Opcode::Sti => "sti", Opcode::Nop => "nop",
             Opcode::Cpuid => "cpuid", Opcode::Iretq => "iretq",
             Opcode::Rdtsc => "rdtsc", Opcode::Rdtscp => "rdtscp",
+            // Ring 0 Privileged
+            Opcode::Lgdt => "lgdt", Opcode::Sgdt => "sgdt",
+            Opcode::Lidt => "lidt", Opcode::Sidt => "sidt",
+            Opcode::Ltr => "ltr", Opcode::Str => "str",
+            Opcode::Lldt => "lldt", Opcode::Sldt => "sldt",
+            Opcode::Lmsw => "lmsw", Opcode::Smsw => "smsw",
+            Opcode::Invlpg => "invlpg", Opcode::Swapgs => "swapgs",
+            Opcode::Wbinvd => "wbinvd", Opcode::Invd => "invd",
+            Opcode::Clts => "clts",
+            Opcode::Rdmsr => "rdmsr", Opcode::Wrmsr => "wrmsr",
+            Opcode::In => "in", Opcode::Out => "out",
+            // Memory Fences
+            Opcode::Mfence => "mfence", Opcode::Lfence => "lfence",
+            Opcode::Sfence => "sfence",
             // Bit manipulation
             Opcode::Bt => "bt", Opcode::Bts => "bts",
             Opcode::Btr => "btr", Opcode::Btc => "btc",

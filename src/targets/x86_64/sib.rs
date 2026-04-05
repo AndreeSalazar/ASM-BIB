@@ -42,9 +42,43 @@ pub fn encode_reg(reg: &Register) -> RegInfo {
         Register::Sp => { ri.is_wide=false; ri.is_16=true; 4 }, Register::Bp => { ri.is_wide=false; ri.is_16=true; 5 },
         Register::Si => { ri.is_wide=false; ri.is_16=true; 6 }, Register::Di => { ri.is_wide=false; ri.is_16=true; 7 },
         
-        // 8-bit Regs
+        // 8-bit Regs (legacy)
         Register::Al => { ri.is_wide=false; ri.is_8=true; 0 }, Register::Cl => { ri.is_wide=false; ri.is_8=true; 1 },
         Register::Dl => { ri.is_wide=false; ri.is_8=true; 2 }, Register::Bl => { ri.is_wide=false; ri.is_8=true; 3 },
+        // 8-bit high byte regs (AH=4, CH=5, DH=6, BH=7 — only accessible without REX prefix)
+        Register::Ah => { ri.is_wide=false; ri.is_8=true; 4 },
+        Register::Ch => { ri.is_wide=false; ri.is_8=true; 5 },
+        Register::Dh => { ri.is_wide=false; ri.is_8=true; 6 },
+        Register::Bh => { ri.is_wide=false; ri.is_8=true; 7 },
+        // 8-bit REX registers (SPL/BPL/SIL/DIL require REX prefix)
+        Register::Spl => { ri.is_wide=false; ri.is_8=true; ri.is_ext=false; 4 },
+        Register::Bpl => { ri.is_wide=false; ri.is_8=true; ri.is_ext=false; 5 },
+        Register::Sil => { ri.is_wide=false; ri.is_8=true; ri.is_ext=false; 6 },
+        Register::Dil => { ri.is_wide=false; ri.is_8=true; ri.is_ext=false; 7 },
+        // 8-bit extended (R8B-R15B)
+        Register::R8b  => { ri.is_wide=false; ri.is_8=true; ri.is_ext=true; 0 },
+        Register::R9b  => { ri.is_wide=false; ri.is_8=true; ri.is_ext=true; 1 },
+        Register::R10b => { ri.is_wide=false; ri.is_8=true; ri.is_ext=true; 2 },
+        Register::R11b => { ri.is_wide=false; ri.is_8=true; ri.is_ext=true; 3 },
+        Register::R12b => { ri.is_wide=false; ri.is_8=true; ri.is_ext=true; 4 },
+        Register::R13b => { ri.is_wide=false; ri.is_8=true; ri.is_ext=true; 5 },
+        Register::R14b => { ri.is_wide=false; ri.is_8=true; ri.is_ext=true; 6 },
+        Register::R15b => { ri.is_wide=false; ri.is_8=true; ri.is_ext=true; 7 },
+        
+        // Control registers (used with MOV CRn instructions — val is CR number)
+        Register::Cr0 => { 0 }, Register::Cr2 => { 2 },
+        Register::Cr3 => { 3 }, Register::Cr4 => { 4 },
+        // Debug registers (used with MOV DRn instructions — val is DR number)
+        Register::Dr0 => { 0 }, Register::Dr1 => { 1 },
+        Register::Dr2 => { 2 }, Register::Dr3 => { 3 },
+        Register::Dr6 => { 6 }, Register::Dr7 => { 7 },
+        // Segment registers (val is segment register number)
+        Register::Es => { ri.is_wide=false; ri.is_16=true; 0 },
+        Register::Cs => { ri.is_wide=false; ri.is_16=true; 1 },
+        Register::Ss => { ri.is_wide=false; ri.is_16=true; 2 },
+        Register::Ds => { ri.is_wide=false; ri.is_16=true; 3 },
+        Register::Fs => { ri.is_wide=false; ri.is_16=true; 4 },
+        Register::Gs => { ri.is_wide=false; ri.is_16=true; 5 },
         
         // SSE/AVX
         Register::Xmm(n) => { ri.is_wide=false; ri.is_ext = *n > 7; *n & 7 },
