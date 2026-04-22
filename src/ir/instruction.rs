@@ -54,8 +54,8 @@ pub enum Opcode {
     Rdmsr, Wrmsr,                   // Model-Specific Registers
     In, Out,                        // I/O port access
 
-    // === Memory Fences ===
-    Mfence, Lfence, Sfence,
+    // === Memory Fences & Atomics ===
+    Mfence, Lfence, Sfence, Lock,
 
     // === Bit manipulation ===
     Bt, Bts, Btr, Btc, Bsf, Bsr,
@@ -238,9 +238,9 @@ impl Opcode {
             "clts" => Some(Opcode::Clts),
             "rdmsr" => Some(Opcode::Rdmsr), "wrmsr" => Some(Opcode::Wrmsr),
             "in" => Some(Opcode::In), "out" => Some(Opcode::Out),
-            // Memory Fences
+            // Memory Fences & Atomics
             "mfence" => Some(Opcode::Mfence), "lfence" => Some(Opcode::Lfence),
-            "sfence" => Some(Opcode::Sfence),
+            "sfence" => Some(Opcode::Sfence), "lock" => Some(Opcode::Lock),
             // Bit manipulation
             "bt" => Some(Opcode::Bt), "bts" => Some(Opcode::Bts),
             "btr" => Some(Opcode::Btr), "btc" => Some(Opcode::Btc),
@@ -473,9 +473,9 @@ impl Opcode {
             Opcode::Clts => "clts",
             Opcode::Rdmsr => "rdmsr", Opcode::Wrmsr => "wrmsr",
             Opcode::In => "in", Opcode::Out => "out",
-            // Memory Fences
+            // Memory Fences & Atomics
             Opcode::Mfence => "mfence", Opcode::Lfence => "lfence",
-            Opcode::Sfence => "sfence",
+            Opcode::Sfence => "sfence", Opcode::Lock => "lock",
             // Bit manipulation
             Opcode::Bt => "bt", Opcode::Bts => "bts",
             Opcode::Btr => "btr", Opcode::Btc => "btc",

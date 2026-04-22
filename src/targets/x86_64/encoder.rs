@@ -1389,10 +1389,11 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
         Opcode::Rdmsr   => { bytes.push(0x0F); bytes.push(0x32); }
         Opcode::Wrmsr   => { bytes.push(0x0F); bytes.push(0x30); }
 
-        // --- Memory Fences ---
+        // --- Memory Fences & Atomics ---
         Opcode::Mfence  => { bytes.push(0x0F); bytes.push(0xAE); bytes.push(0xF0); }
         Opcode::Lfence  => { bytes.push(0x0F); bytes.push(0xAE); bytes.push(0xE8); }
         Opcode::Sfence  => { bytes.push(0x0F); bytes.push(0xAE); bytes.push(0xF8); }
+        Opcode::Lock    => { bytes.push(0xF0); }
 
         // --- IN / OUT (I/O port access) ---
         Opcode::In => {
