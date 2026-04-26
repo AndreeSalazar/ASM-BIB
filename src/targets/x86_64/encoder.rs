@@ -906,6 +906,13 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
                 bytes.push(0x0F);
                 bytes.push(cc_byte);
                 bytes.push(sib::modrm(3, 0, ri.val));
+            } else if let Some(Operand::Memory { base, index, scale, disp, .. }) = inst.operands.get(0) {
+                // SETcc [mem] — 0F 9x /0 with memory operand
+                let mem = sib::resolve_memory(0, base.as_ref(), index.as_ref(), *scale, *disp);
+                if let Some(rex) = sib::build_rex(false, false, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                bytes.push(0x0F);
+                bytes.push(cc_byte);
+                bytes.extend(mem.payload);
             }
         }
         
@@ -929,6 +936,14 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
                 bytes.push(0x0F);
                 bytes.push(cc_byte);
                 bytes.push(sib::modrm(3, di.val, si.val));
+            } else if let (Some(Operand::Reg(dst)), Some(Operand::Memory { base, index, scale, disp, .. })) = (inst.operands.get(0), inst.operands.get(1)) {
+                // CMOVcc reg, [mem] — 0F 4x /r with memory operand
+                let di = sib::encode_reg(dst);
+                let mem = sib::resolve_memory(di.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                if let Some(rex) = sib::build_rex(di.is_wide, di.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                bytes.push(0x0F);
+                bytes.push(cc_byte);
+                bytes.extend(mem.payload);
             }
         }
         
@@ -1855,6 +1870,53 @@ pub fn encode_instruction(inst: &Instruction, labels: Option<&HashMap<String, u3
         // Plain RET (C3) already handled above; this is RET with stack cleanup
         // Caught by the existing Opcode::Ret if operands > 0:
         // (We handle it here since the Opcode::Ret at top only emits C3 for 0 operands)
+
+        // === FASE 18: MOVSXD (63 /r with REX.W) — Sign-extend DWORD→QWORD ===
+        Opcode::Movsxd => {
+            if let (Some(Operand::Reg(dst)), Some(src)) = (inst.operands.get(0), inst.operands.get(1)) {
+                let di = sib::encode_reg(dst);
+                match src {
+                    Operand::Reg(s) => {
+                        let si = sib::encode_reg(s);
+                        // REX.W is always needed for MOVSXD (sign-extend 32→64)
+                        if let Some(rex) = sib::build_rex(true, di.is_ext, false, si.is_ext) { bytes.push(rex); }
+                        bytes.push(0x63);
+                        bytes.push(sib::modrm(3, di.val, si.val));
+                    }
+                    Operand::Memory { base, index, scale, disp, .. } => {
+                        let mem = sib::resolve_memory(di.val, base.as_ref(), index.as_ref(), *scale, *disp);
+                        if let Some(rex) = sib::build_rex(true, di.is_ext, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                        bytes.push(0x63);
+                        bytes.extend(mem.payload);
+                    }
+                    Operand::Label(lbl) => {
+                        if let Some(rex) = sib::build_rex(true, di.is_ext, false, false) { bytes.push(rex); }
+                        bytes.push(0x63);
+                        bytes.push(sib::modrm(0, di.val, 5)); // RIP-relative
+                        bytes.extend_from_slice(&[0,0,0,0]);
+                        relocations.push(RelocationReq { offset: bytes.len() as u32 - 4, symbol: lbl.clone(), rel_type: 4 });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // === FASE 18: PREFETCH* (0F 18 /0-3) — Cache hints ===
+        Opcode::Prefetchnta | Opcode::Prefetcht0 | Opcode::Prefetcht1 | Opcode::Prefetcht2 => {
+            let ext = match inst.opcode {
+                Opcode::Prefetchnta => 0,
+                Opcode::Prefetcht0  => 1,
+                Opcode::Prefetcht1  => 2,
+                Opcode::Prefetcht2  => 3,
+                _ => unreachable!(),
+            };
+            if let Some(Operand::Memory { base, index, scale, disp, .. }) = inst.operands.get(0) {
+                let mem = sib::resolve_memory(ext, base.as_ref(), index.as_ref(), *scale, *disp);
+                if let Some(rex) = sib::build_rex(false, false, mem.rex_x, mem.rex_b) { bytes.push(rex); }
+                bytes.push(0x0F); bytes.push(0x18);
+                bytes.extend(mem.payload);
+            }
+        }
 
         _ => return Err(format!("Unimplemented binary encoding for {:?}", inst.opcode)),
     }

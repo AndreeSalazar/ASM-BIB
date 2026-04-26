@@ -41,6 +41,15 @@ pub fn encode_reg(reg: &Register) -> RegInfo {
         Register::Dx => { ri.is_wide=false; ri.is_16=true; 2 }, Register::Bx => { ri.is_wide=false; ri.is_16=true; 3 },
         Register::Sp => { ri.is_wide=false; ri.is_16=true; 4 }, Register::Bp => { ri.is_wide=false; ri.is_16=true; 5 },
         Register::Si => { ri.is_wide=false; ri.is_16=true; 6 }, Register::Di => { ri.is_wide=false; ri.is_16=true; 7 },
+        // 16-bit Extended Regs (R8W-R15W)
+        Register::R8w  => { ri.is_wide=false; ri.is_16=true; ri.is_ext=true; 0 },
+        Register::R9w  => { ri.is_wide=false; ri.is_16=true; ri.is_ext=true; 1 },
+        Register::R10w => { ri.is_wide=false; ri.is_16=true; ri.is_ext=true; 2 },
+        Register::R11w => { ri.is_wide=false; ri.is_16=true; ri.is_ext=true; 3 },
+        Register::R12w => { ri.is_wide=false; ri.is_16=true; ri.is_ext=true; 4 },
+        Register::R13w => { ri.is_wide=false; ri.is_16=true; ri.is_ext=true; 5 },
+        Register::R14w => { ri.is_wide=false; ri.is_16=true; ri.is_ext=true; 6 },
+        Register::R15w => { ri.is_wide=false; ri.is_16=true; ri.is_ext=true; 7 },
         
         // 8-bit Regs (legacy)
         Register::Al => { ri.is_wide=false; ri.is_8=true; 0 }, Register::Cl => { ri.is_wide=false; ri.is_8=true; 1 },

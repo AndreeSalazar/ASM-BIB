@@ -4,7 +4,7 @@ use super::register::Register;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Opcode {
     // === Movement ===
-    Mov, Movzx, Movsx, Lea, Xchg, Push, Pop,
+    Mov, Movzx, Movsx, Movsxd, Lea, Xchg, Push, Pop,
     Pushf, Popf, Pushad, Popad,
     Enter, // ENTER imm, imm
 
@@ -60,6 +60,9 @@ pub enum Opcode {
     // === Bit manipulation ===
     Bt, Bts, Btr, Btc, Bsf, Bsr,
     Popcnt, Lzcnt, Tzcnt,
+
+    // === Cache hints ===
+    Prefetcht0, Prefetcht1, Prefetcht2, Prefetchnta,
 
     // === Byte swap / atomic ===
     Bswap, Xadd, Cmpxchg, Cmpxchg8b, Cmpxchg16b,
@@ -158,7 +161,8 @@ impl Opcode {
         match s.to_lowercase().as_str() {
             // Movement
             "mov" => Some(Opcode::Mov), "movzx" => Some(Opcode::Movzx),
-            "movsx" => Some(Opcode::Movsx), "lea" => Some(Opcode::Lea),
+            "movsx" => Some(Opcode::Movsx), "movsxd" => Some(Opcode::Movsxd),
+            "lea" => Some(Opcode::Lea),
             "xchg" => Some(Opcode::Xchg), "push" => Some(Opcode::Push),
             "pop" => Some(Opcode::Pop),
             "pushf" | "pushfq" => Some(Opcode::Pushf),
@@ -247,6 +251,9 @@ impl Opcode {
             "bsf" => Some(Opcode::Bsf), "bsr" => Some(Opcode::Bsr),
             "popcnt" => Some(Opcode::Popcnt), "lzcnt" => Some(Opcode::Lzcnt),
             "tzcnt" => Some(Opcode::Tzcnt),
+            // Cache hints
+            "prefetcht0" => Some(Opcode::Prefetcht0), "prefetcht1" => Some(Opcode::Prefetcht1),
+            "prefetcht2" => Some(Opcode::Prefetcht2), "prefetchnta" => Some(Opcode::Prefetchnta),
             // Byte swap / atomic
             "bswap" => Some(Opcode::Bswap), "xadd" => Some(Opcode::Xadd),
             "cmpxchg" => Some(Opcode::Cmpxchg),
@@ -405,6 +412,7 @@ impl Opcode {
         match self {
             // Movement
             Opcode::Mov => "mov", Opcode::Movzx => "movzx", Opcode::Movsx => "movsx",
+            Opcode::Movsxd => "movsxd",
             Opcode::Lea => "lea", Opcode::Xchg => "xchg",
             Opcode::Push => "push", Opcode::Pop => "pop",
             Opcode::Pushf => "pushfq", Opcode::Popf => "popfq",
@@ -482,6 +490,9 @@ impl Opcode {
             Opcode::Bsf => "bsf", Opcode::Bsr => "bsr",
             Opcode::Popcnt => "popcnt", Opcode::Lzcnt => "lzcnt",
             Opcode::Tzcnt => "tzcnt",
+            // Cache hints
+            Opcode::Prefetcht0 => "prefetcht0", Opcode::Prefetcht1 => "prefetcht1",
+            Opcode::Prefetcht2 => "prefetcht2", Opcode::Prefetchnta => "prefetchnta",
             // Byte swap / atomic
             Opcode::Bswap => "bswap", Opcode::Xadd => "xadd",
             Opcode::Cmpxchg => "cmpxchg",

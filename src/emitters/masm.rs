@@ -557,6 +557,7 @@ fn maybe_size_prefix(addr: String, size: Option<Size>) -> String {
         Some(Size::Word) => format!("WORD PTR {}", addr),
         Some(Size::Dword) => format!("DWORD PTR {}", addr),
         Some(Size::Qword) => format!("QWORD PTR {}", addr),
+        Some(Size::Tbyte) => format!("TBYTE PTR {}", addr),
         Some(Size::Xmmword) => format!("XMMWORD PTR {}", addr),
         Some(Size::Ymmword) => format!("YMMWORD PTR {}", addr),
         Some(Size::Zmmword) => format!("ZMMWORD PTR {}", addr),

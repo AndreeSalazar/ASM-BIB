@@ -24,6 +24,7 @@ pub enum Size {
     Word,    // 16-bit
     Dword,   // 32-bit
     Qword,   // 64-bit
+    Tbyte,   // 80-bit (x87 FPU extended precision)
     Xmmword, // 128-bit SSE
     Ymmword, // 256-bit AVX
     Zmmword, // 512-bit AVX-512
@@ -36,6 +37,7 @@ impl Size {
             Size::Word => 16,
             Size::Dword => 32,
             Size::Qword => 64,
+            Size::Tbyte => 80,
             Size::Xmmword => 128,
             Size::Ymmword => 256,
             Size::Zmmword => 512,
@@ -54,6 +56,8 @@ pub enum Register {
     R8d, R9d, R10d, R11d, R12d, R13d, R14d, R15d,
     // x86 General Purpose (16-bit)
     Ax, Bx, Cx, Dx, Si, Di, Sp, Bp,
+    // x86-64 General Purpose (16-bit, extended)
+    R8w, R9w, R10w, R11w, R12w, R13w, R14w, R15w,
     // x86 General Purpose (8-bit)
     Al, Ah, Bl, Bh, Cl, Ch, Dl, Dh,
     // x86-64 General Purpose (8-bit, REX-required)
@@ -100,6 +104,11 @@ impl Register {
             "cx" => Some(Register::Cx), "dx" => Some(Register::Dx),
             "si" => Some(Register::Si), "di" => Some(Register::Di),
             "sp" => Some(Register::Sp), "bp" => Some(Register::Bp),
+            // x86-64 (16-bit extended)
+            "r8w" => Some(Register::R8w), "r9w" => Some(Register::R9w),
+            "r10w" => Some(Register::R10w), "r11w" => Some(Register::R11w),
+            "r12w" => Some(Register::R12w), "r13w" => Some(Register::R13w),
+            "r14w" => Some(Register::R14w), "r15w" => Some(Register::R15w),
             // x86 (8-bit)
             "al" => Some(Register::Al), "ah" => Some(Register::Ah),
             "bl" => Some(Register::Bl), "bh" => Some(Register::Bh),
@@ -164,6 +173,10 @@ impl Register {
             Register::Cx => "cx".into(), Register::Dx => "dx".into(),
             Register::Si => "si".into(), Register::Di => "di".into(),
             Register::Sp => "sp".into(), Register::Bp => "bp".into(),
+            Register::R8w => "r8w".into(), Register::R9w => "r9w".into(),
+            Register::R10w => "r10w".into(), Register::R11w => "r11w".into(),
+            Register::R12w => "r12w".into(), Register::R13w => "r13w".into(),
+            Register::R14w => "r14w".into(), Register::R15w => "r15w".into(),
             Register::Al => "al".into(), Register::Ah => "ah".into(),
             Register::Bl => "bl".into(), Register::Bh => "bh".into(),
             Register::Cl => "cl".into(), Register::Ch => "ch".into(),
@@ -199,6 +212,8 @@ impl Register {
 
             Register::Ax | Register::Bx | Register::Cx | Register::Dx |
             Register::Si | Register::Di | Register::Sp | Register::Bp |
+            Register::R8w | Register::R9w | Register::R10w | Register::R11w |
+            Register::R12w | Register::R13w | Register::R14w | Register::R15w |
             Register::Cs | Register::Ds | Register::Es | Register::Fs |
             Register::Gs | Register::Ss => Size::Word,
 
